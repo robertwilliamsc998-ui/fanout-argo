@@ -16,6 +16,19 @@
 
 ## 原理
 
+### Argo 双入口（v1.2.0-final6）
+
+在保留 fanout 原有出口模式的基础上，可为 VLESS-WS / VMess-WS 分别创建 Argo Tunnel，
+并把每条 Argo 入站绑定到指定 fanout 出口。Argo 管理命令：
+
+```bash
+f argo
+```
+
+final6 特别处理了 Argo 生命周期：VPS 重启会重新从 Xray 入站恢复 Client UUID；
+手动 Stop 会禁止自动恢复，手动 Start 会解除禁用并重新同步 UUID；Quick Tunnel
+会等待 `trycloudflare.com` 域名后再标记为可用；同一 Argo 的 UUID 恢复任务不会重复并发。
+
 每个节点跑在独立的 network namespace 里，netns 内启动官方 openvpn 客户端。
 SOCKS5 监听在母机，出站连接用 `setns` 切进对应 netns 建立。
 

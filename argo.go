@@ -41,12 +41,13 @@ type argoStore struct {
 }
 
 type ArgoManager struct {
-	mu    sync.Mutex
-	dir   string
-	mgr   *Manager
-	panel Panel
-	store *argoStore
-	procs map[int]*exec.Cmd
+	mu       sync.Mutex
+	dir      string
+	mgr      *Manager
+	panel    Panel
+	store    *argoStore
+	procs    map[int]*exec.Cmd
+	retrying map[int]bool
 }
 
 func newArgoManager(dir string, mgr *Manager, panel Panel) (*ArgoManager, error) {
@@ -65,7 +66,7 @@ func newArgoManager(dir string, mgr *Manager, panel Panel) (*ArgoManager, error)
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	return &ArgoManager{dir: dir, mgr: mgr, panel: panel, store: st, procs: map[int]*exec.Cmd{}}, nil
+	return &ArgoManager{dir: dir, mgr: mgr, panel: panel, store: st, procs: map[int]*exec.Cmd{}, retrying: map[int]bool{}}, nil
 }
 
 func (a *ArgoManager) saveLocked() error {
@@ -302,7 +303,7 @@ func (a *ArgoManager) watchProcess(id int, cmd *exec.Cmd, f *os.File) {
 		cur.Status = "starting"
 		if e := a.refreshLinkLocked(cur); e != nil {
 			cur.Error = "恢复客户端 UUID 失败: " + e.Error()
-			go a.retryRefreshLink(id)
+			a.scheduleRetryLocked(id)
 		}
 		if e := a.startLocked(cur); e != nil {
 			cur.Status = "down"
@@ -342,7 +343,7 @@ func (a *ArgoManager) waitQuickHostname(id int, logp string) {
 			_ = a.saveLocked()
 			a.writeInfoLocked()
 			a.mu.Unlock()
-			go a.retryRefreshLink(id)
+			a.scheduleRetryLocked(id)
 			return
 		}
 		x.Status = "up"
@@ -379,7 +380,7 @@ func (a *ArgoManager) Start(id int) error {
 
 	if err := a.refreshLinkLocked(x); err != nil {
 		x.Error = "恢复客户端 UUID 失败: " + err.Error()
-		go a.retryRefreshLink(x.ID)
+		a.scheduleRetryLocked(x.ID)
 	}
 	if x.Mode == "quick" {
 		// Quick Tunnel 每次重新启动都可能得到新域名；旧链接必须作废。
@@ -407,6 +408,7 @@ func (a *ArgoManager) Stop(id int) error {
 	}
 	x.Status = "stopped"
 	x.Disabled = true
+	delete(a.retrying, id)
 	if p := a.procs[id]; p != nil && p.Process != nil {
 		_ = p.Process.Signal(syscall.SIGTERM)
 		// 立即从当前进程映射移除。旧 watcher 会识别到映射变化，不会自动重启。
@@ -421,6 +423,7 @@ func (a *ArgoManager) Stop(id int) error {
 func (a *ArgoManager) Delete(id int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	delete(a.retrying, id)
 	x := a.find(id)
 	if x == nil {
 		return errors.New("Argo 不存在")
@@ -457,7 +460,7 @@ func (a *ArgoManager) Restore() {
 		// clientID 不持久化。每次 VPS 启动都从 Xray 入站重新取得真实 UUID。
 		if err := a.refreshLinkLocked(x); err != nil {
 			x.Error = "恢复客户端 UUID 失败: " + err.Error()
-			go a.retryRefreshLink(x.ID)
+			a.scheduleRetryLocked(x.ID)
 		}
 
 		if x.Mode == "quick" {
@@ -476,11 +479,29 @@ func (a *ArgoManager) Restore() {
 	a.writeInfoLocked()
 }
 
+// scheduleRetryLocked 确保同一个 Argo 同时只有一个 UUID 恢复任务。
+// 调用者必须持有 a.mu。
+func (a *ArgoManager) scheduleRetryLocked(id int) {
+	if a.retrying == nil {
+		a.retrying = make(map[int]bool)
+	}
+	if a.retrying[id] {
+		return
+	}
+	a.retrying[id] = true
+	go a.retryRefreshLink(id)
+}
+
 // retryRefreshLink 在 VPS 重启、Xray/3x-ui/native 面板尚未完全就绪时，
-// 重新读取入站客户端 UUID。成功后立即重建节点链接并刷新 info.txt。
-// 总等待时间约 60 秒。
+// 重新读取入站客户端 UUID。累计等待 60 秒，成功后立即重建节点并刷新 info.txt。
 func (a *ArgoManager) retryRefreshLink(id int) {
-	waits := []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second}
+	waits := []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second}
+	defer func() {
+		a.mu.Lock()
+		delete(a.retrying, id)
+		a.mu.Unlock()
+	}()
+
 	for _, wait := range waits {
 		time.Sleep(wait)
 
