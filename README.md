@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout
 ```
 
 会自动下载对应架构的预编译二进制。也可以 clone 仓库后在源码目录运行同一个脚本，
-那样会从源码编译（需要 Go 1.21+）。
+那样会从源码编译（需要 Go 1.24+）。
 
 依赖（openvpn / curl / openssl / iproute / iptables）会按发行版自动装，
 apt、dnf、yum、pacman、apk、zypper 都认。没装 3x-ui 时还会顺带下载一份
@@ -113,7 +113,7 @@ REALITY 的密钥对和 shortId 自动生成；TLS 不填证书就生成自签�
 
 ```
   状态      运行中
-  版本      fanout v0.1.1
+  版本      fanout v1.2.0
   开机自启  enabled
 
   管理地址  http://1.2.3.4:8899/gwPuWHvaNr/

@@ -172,11 +172,13 @@ func apiArgo(a *ArgoManager) http.HandlerFunc {
 		case http.MethodGet:
 			writeJSON(w, http.StatusOK, a.list())
 		case http.MethodPost:
-			protocol := q.Get("protocol")
-			mode := q.Get("mode")
-			hostname := q.Get("hostname")
-			token := q.Get("token")
-			exitHost := q.Get("exit")
+			// 使用 POST 表单承载 Token，避免把 Tunnel Token 放进 URL/query string。
+			_ = r.ParseForm()
+			protocol := r.FormValue("protocol")
+			mode := r.FormValue("mode")
+			hostname := r.FormValue("hostname")
+			token := r.FormValue("token")
+			exitHost := r.FormValue("exit")
 			x, err := a.Create(protocol, mode, hostname, token, exitHost)
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

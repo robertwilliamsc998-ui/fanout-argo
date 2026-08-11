@@ -27,6 +27,7 @@ type Argo struct {
 	Mode      string    `json:"mode"` // quick | fixed
 	Token     string    `json:"token,omitempty"`
 	Status    string    `json:"status"`
+	Disabled  bool      `json:"disabled,omitempty"`
 	Link      string    `json:"link"`
 	Error     string    `json:"error,omitempty"`
 	PID       int       `json:"pid,omitempty"`
@@ -155,7 +156,7 @@ func (a *ArgoManager) Create(protocol, mode, hostname, token, exitHost string) (
 		_ = a.panel.DeleteInbounds([]int{ib.ID}, a.mgr.Tunnels())
 		return nil, errors.New("必须指定 fanout 出口")
 	}
-	x := &Argo{ID: a.store.NextID, Protocol: protocol, Hostname: hostname, Path: path, LocalPort: ib.Port, InboundID: ib.ID, ExitHost: exitHost, Mode: mode, Token: token, Status: "starting", CreatedAt: time.Now()}
+	x := &Argo{ID: a.store.NextID, Protocol: protocol, Hostname: hostname, Path: path, LocalPort: ib.Port, InboundID: ib.ID, ExitHost: exitHost, Mode: mode, Token: token, Status: "starting", Disabled: false, CreatedAt: time.Now()}
 	a.store.NextID++
 	a.store.Argo = append(a.store.Argo, x)
 	if err := a.refreshLinkLocked(x); err != nil {
@@ -331,6 +332,7 @@ func (a *ArgoManager) Stop(id int) error {
 		return errors.New("Argo 不存在")
 	}
 	x.Status = "stopped"
+	x.Disabled = true
 	if p := a.procs[id]; p != nil && p.Process != nil {
 		_ = p.Process.Signal(syscall.SIGTERM)
 		delete(a.procs, id)
@@ -370,6 +372,10 @@ func (a *ArgoManager) Restore() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, x := range a.store.Argo {
+		if x.Disabled {
+			x.Status = "stopped"
+			continue
+		}
 		if x.Mode == "quick" {
 			x.Hostname = ""
 			x.Link = ""

@@ -317,7 +317,13 @@ argo_menu() {
         [[ -z "$exit" ]] && { echo "  必须指定出口 HostName"; pause; continue; }
         host=""; token=""
         if [[ "$mode" == fixed ]]; then read -rp "  Argo 域名: " host; read -rsp "  Tunnel Token: " token; echo; fi
-        ck=$(argo_api_login); resp=$(curl -s --max-time 30 -b "$ck" -X POST "http://127.0.0.1:${port}/${bp}/api/argo?protocol=${protocol}&mode=${mode}&hostname=${host}&token=${token}&exit=${exit}"); rm -f "$ck"; echo; echo "$resp"; pause;;
+        ck=$(argo_api_login); resp=$(curl -s --max-time 30 -b "$ck" -X POST \
+          --data-urlencode "protocol=${protocol}" \
+          --data-urlencode "mode=${mode}" \
+          --data-urlencode "hostname=${host}" \
+          --data-urlencode "token=${token}" \
+          --data-urlencode "exit=${exit}" \
+          "http://127.0.0.1:${port}/${bp}/api/argo"); rm -f "$ck"; echo; echo "$resp"; pause;;
       3|4)
         read -rp "  Argo ID: " id; action=start; [[ "$choice" == 4 ]] && action=stop
         ck=$(argo_api_login); resp=$(curl -s --max-time 15 -b "$ck" -X PUT "http://127.0.0.1:${port}/${bp}/api/argo?id=${id}&action=${action}"); rm -f "$ck"; echo "$resp"; pause;;
