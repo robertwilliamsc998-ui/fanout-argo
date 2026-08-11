@@ -371,17 +371,59 @@ func (a *ArgoManager) Delete(id int) error {
 func (a *ArgoManager) Restore() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	for _, x := range a.store.Argo {
 		if x.Disabled {
 			x.Status = "stopped"
 			continue
 		}
+
+		// clientID 不写入 argo.json。VPS 重启后必须从 Xray 入站重新读取，
+		// 否则恢复出来的 VLESS/VMess 节点会因为 UUID 为空而失效。
+		if err := a.refreshLinkLocked(x); err != nil {
+			x.Error = "恢复客户端 UUID 失败: " + err.Error()
+			// 不因为面板瞬时不可用而阻止 cloudflared 恢复；后台会继续重试。
+			go a.retryRefreshLink(x.ID)
+		}
+
 		if x.Mode == "quick" {
+			// Quick Tunnel 每次启动都会获得新的 trycloudflare.com 域名。
 			x.Hostname = ""
 			x.Link = ""
 		}
 		x.Status = "starting"
-		_ = a.startLocked(x)
+		if err := a.startLocked(x); err != nil {
+			x.Status = "down"
+			x.Error = err.Error()
+		}
+	}
+	_ = a.saveLocked()
+	a.writeInfoLocked()
+}
+
+// retryRefreshLink 在 VPS 重启、3x-ui/native 面板尚未完全就绪时，
+// 周期性重新读取入站客户端 UUID。恢复成功后立即重建节点链接。
+func (a *ArgoManager) retryRefreshLink(id int) {
+	for i := 0; i < 12; i++ {
+		time.Sleep(5 * time.Second)
+
+		a.mu.Lock()
+		x := a.find(id)
+		if x == nil || x.Disabled {
+			a.mu.Unlock()
+			return
+		}
+		err := a.refreshLinkLocked(x)
+		if err == nil {
+			x.Error = ""
+			a.writeInfoLocked()
+			_ = a.saveLocked()
+			a.mu.Unlock()
+			return
+		}
+		x.Error = "恢复客户端 UUID 失败: " + err.Error()
+		_ = a.saveLocked()
+		a.mu.Unlock()
 	}
 }
 func (a *ArgoManager) Close() {
