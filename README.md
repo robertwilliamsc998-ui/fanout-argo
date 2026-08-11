@@ -26,33 +26,16 @@ SOCKS5 监听在母机，出站连接用 `setns` 切进对应 netns 建立。
 客户端 ──> 母机 SOCKS5 :随机端口 ──> netns foN ──> openvpn ──> VPN Gate 节点
 ```
 
-## GitHub 一键安装
-
-把本仓库上传到你自己的 GitHub 后，将 `YOUR_GITHUB_USERNAME/fanout-argo` 替换成实际仓库名。
-创建一个 `v1.1.1-argo1` 之类的 tag，GitHub Actions 会自动编译 amd64/arm64 并生成 Release。
-
-一键安装命令：
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/fanout-argo/main/install.sh)
-```
-
-也可以显式指定仓库，方便 fork 后测试：
-
-```bash
-FANOUT_REPO=YOUR_GITHUB_USERNAME/fanout-argo bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/fanout-argo/main/install.sh)
-```
-
 ## 安装
 
 需要 root，Linux（依赖 netns）。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/fanout-argo/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/main/install.sh)
 ```
 
 会自动下载对应架构的预编译二进制。也可以 clone 仓库后在源码目录运行同一个脚本，
-那样会从源码编译（需要 Go 1.24+）。
+那样会从源码编译（需要 Go 1.21+）。
 
 依赖（openvpn / curl / openssl / iproute / iptables）会按发行版自动装，
 apt、dnf、yum、pacman、apk、zypper 都认。没装 3x-ui 时还会顺带下载一份
@@ -64,7 +47,7 @@ Xray 到 `/var/lib/fanout/bin/`，装了则跳过，入站交给面板管。
 
 ```bash
 apk add bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/fanout-argo/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/main/install.sh)
 ```
 
 另外 fanout 要在 netns 里跑 openvpn，**宿主必须放开 `/dev/net/tun`**。
@@ -184,61 +167,46 @@ netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符
 
 用着有问题、或者想要什么功能，去群里说或提 issue。
 
+## Fanout Argo 增强版
 
-## Argo 入口（增强版）
-
-此版本在不改变 fanout 原有 VPN Gate / netns / SOCKS5 出口逻辑的前提下，增加可选 Cloudflare Tunnel 入口。
+本版本在不改变 fanout 原有 VPN Gate / netns / SOCKS5 出口机制的前提下，增加 Cloudflare Tunnel（Argo）入口。
 
 数据路径：
 
-```text
-客户端
-  ↓ VLESS-WS / VMess-WS
-Cloudflare Tunnel / Argo
-  ↓
-VPS 本机 Xray
-  ↓
-fanout SOCKS5
-  ↓
-对应 netns
-  ↓
-VPN Gate
-  ↓
-最终出口 IP
+`客户端 → Cloudflare Tunnel → Xray WS 入站 → fanout 指定出口 → VPN Gate → 最终出口 IP`
+
+### 一键安装
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/main/install.sh)
 ```
 
-安装脚本会尝试把 `cloudflared` 放到 `/var/lib/fanout/bin/cloudflared`。
+安装器会自动准备 Xray 与 cloudflared；正式安装建议使用 GitHub Release 版本。
 
-### 固定 Argo
-
-在 Cloudflare Tunnel 中先创建 Tunnel，并为域名配置 Public Hostname，Origin Service 指向：
-
-```text
-http://127.0.0.1:<fanout 创建的 WS 端口>
-```
-
-然后在 fanout Web 管理界面的 **Argo** 中填写：
-
-- 协议：VLESS-WS 或 VMess-WS
-- fanout 出口：选择一个运行中的 VPN Gate 出口
-- 固定 Argo 域名：例如 `argo.example.com`
-- Tunnel Token：Cloudflare Tunnel Token
-- WS 路径：留空自动随机
-
-fanout 会自动创建一个 WS 入站，并把它绑定到所选 fanout 出口；cloudflared 只负责把公网请求转到这个本机 WS 端口。
-
-### Quick Tunnel
-
-不填写 Token 和域名即可创建 Quick Tunnel。cloudflared 会分配随机的 `trycloudflare.com` 域名。Quick Tunnel 的域名重启后可能变化，而且 Cloudflare 明确将 Quick Tunnel 定位为测试/开发用途，因此不建议作为长期固定节点。固定 Tunnel 请使用远程管理 Tunnel + Token。
-
-### CLI
-
-也可以执行：
+### Argo 管理
 
 ```bash
 f argo
 ```
 
-进入 Argo 管理菜单。
+支持：
 
-> Argo 只是入口，不改变 fanout 的出口机制。晚高峰是否改善取决于 Cloudflare 到 VPS、VPS 到 VPN Gate 以及 VPN Gate 节点本身的线路质量；Argo 不会把 VPN Gate 变成家宽出口。
+- VLESS-WS + Quick Tunnel
+- VMess-WS + Quick Tunnel
+- VLESS-WS + 固定 Tunnel
+- VMess-WS + 固定 Tunnel
+- 每条 Argo 绑定一个正在运行的 fanout VPN Gate 出口
+- cloudflared 异常退出自动重启
+- 节点写入 `/root/info.txt`
+
+### 固定 Tunnel
+
+固定 Tunnel 使用 Cloudflare Remote-managed Tunnel Token。创建 Tunnel 后，在 Cloudflare 的 Public Hostname 中把域名指向 fanout 创建的本机 WS 端口，例如：
+
+`argo.example.com → http://127.0.0.1:23456`
+
+然后在 `f argo` 中选择“固定 Tunnel”，填写域名、Tunnel Token 和 fanout 出口 HostName。
+
+### Quick Tunnel
+
+Quick Tunnel 不需要域名和 Token，cloudflared 会生成 `trycloudflare.com` 域名并自动写入节点。Quick Tunnel 适合测试，不建议作为长期生产节点。

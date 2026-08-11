@@ -5,7 +5,7 @@ set -uo pipefail
 WORK_DIR=/var/lib/fanout
 SERVICE=fanout
 BIN=/usr/local/bin/fanout
-REPO="${REPO:-${FANOUT_REPO:-YOUR_GITHUB_USERNAME/fanout-argo}}"
+REPO="${REPO:-robertwilliamsc998-ui/fanout-argo}"
 
 G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; B='\033[0;36m'; D='\033[2m'; N='\033[0m'
 
@@ -237,113 +237,9 @@ show_links() {
   echo -e "  交流群  ${B}https://t.me/+ft-zI76oovgwNmRh${N}"
   echo -e "  油管    ${B}https://youtube.com/@joeyblog${N}"
   echo -e "  博客    ${B}https://joeyblog.net${N}"
-  echo -e "  项目    ${B}https://github.com/YOUR_GITHUB_USERNAME/fanout-argo${N}"
+  echo -e "  项目    ${B}https://github.com/robertwilliamsc998-ui/fanout-argo${N}"
   echo
   echo -e "  ${D}用着有问题、或者想要什么功能，去群里说或提 issue。${N}"
-}
-
-
-argo_api() {
-  local path="$1"; shift
-  local port bp pw ck
-  port=$(web_port)
-  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  pw=$(cat "$WORK_DIR/password" 2>/dev/null)
-  ck=$(mktemp)
-  curl -s --max-time 10 -c "$ck" -X POST \
-    --data-urlencode "password=${pw}" \
-    "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
-  curl -s --max-time 20 -b "$ck" "$@" \
-    "http://127.0.0.1:${port}/${bp}${path}"
-  rm -f "$ck"
-}
-
-argo_list() {
-  echo
-  echo "  Argo 节点"
-  echo
-  argo_api "/api/argo" | sed 's/},{/}\n{/g'
-  echo
-}
-
-argo_create() {
-  local protocol host hostname token path
-  echo
-  echo "  Argo 只负责入口，最终出口仍然是 fanout/VPN Gate。"
-  echo "  token 留空 = Quick Tunnel（随机 trycloudflare.com 域名）"
-  echo
-  read -rp "  协议 [vless/vmess] (默认 vless): " protocol
-  protocol=${protocol:-vless}
-  read -rp "  fanout 出口主机名（可用 f list 查看）: " host
-  [[ -n $host ]] || { echo -e "  ${R}必须填写出口主机名${N}"; return; }
-  read -rp "  固定 Argo 域名（Quick Tunnel 留空）: " hostname
-  if [[ -n $hostname ]]; then
-    read -rsp "  Cloudflare Tunnel Token: " token
-    echo
-  else
-    token=""
-  fi
-  read -rp "  WS 路径（留空自动随机）: " path
-
-  local port bp pw ck
-  port=$(web_port); bp=$(cat "$WORK_DIR/basepath" 2>/dev/null); pw=$(cat "$WORK_DIR/password" 2>/dev/null)
-  ck=$(mktemp)
-  curl -s --max-time 10 -c "$ck" -X POST \
-    --data-urlencode "password=${pw}" \
-    "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
-
-  echo
-  echo "  正在创建..."
-  curl -s --max-time 90 -b "$ck" -X POST \
-    --data-urlencode "protocol=${protocol}" \
-    --data-urlencode "tunnel_host=${host}" \
-    --data-urlencode "hostname=${hostname}" \
-    --data-urlencode "token=${token}" \
-    --data-urlencode "path=${path}" \
-    "http://127.0.0.1:${port}/${bp}/api/argo/create"
-  rm -f "$ck"
-  echo
-}
-
-argo_start_stop() {
-  local action="$1" id
-  read -rp "  Argo ID: " id
-  [[ $id =~ ^[0-9]+$ ]] || { echo -e "  ${R}ID 无效${N}"; return; }
-  argo_api "/api/argo/${action}?id=${id}" -X POST
-  echo
-}
-
-argo_delete() {
-  local id
-  read -rp "  Argo ID: " id
-  [[ $id =~ ^[0-9]+$ ]] || { echo -e "  ${R}ID 无效${N}"; return; }
-  read -rp "  确认删除 Argo ${id} 及对应 Xray 入站？[y/N]: " yes
-  [[ ${yes,,} == y ]] || return
-  argo_api "/api/argo/delete?id=${id}" -X POST
-  echo
-}
-
-argo_menu() {
-  while true; do
-    clear
-    echo -e "${B}  fanout Argo${N}"
-    echo
-    argo_list
-    echo "  1) 新建 Argo 节点"
-    echo "  2) 启动"
-    echo "  3) 停止"
-    echo "  4) 删除"
-    echo "  0) 返回"
-    echo
-    read -rp "  选择: " choice
-    case "$choice" in
-      1) argo_create; pause ;;
-      2) argo_start_stop start; pause ;;
-      3) argo_start_stop stop; pause ;;
-      4) argo_delete; pause ;;
-      0) return ;;
-    esac
-  done
 }
 
 do_update() {
@@ -392,6 +288,49 @@ do_uninstall() {
   exit 0
 }
 
+argo_api_login() {
+  local ck pw port bp
+  ck=$(mktemp); pw=$(cat "$WORK_DIR/password" 2>/dev/null || true); port=$(web_port); bp=$(cat "$WORK_DIR/basepath" 2>/dev/null || true)
+  curl -s --max-time 8 -c "$ck" -X POST -d "password=${pw}" "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
+  echo "$ck"
+}
+argo_menu() {
+  need_root
+  local ck json choice protocol mode host token exit id action
+  while true; do
+    clear; echo -e "${B}  fanout Argo${N}  ${D}Cloudflare Tunnel → fanout 出口${N}"; echo
+    ck=$(argo_api_login); port=$(web_port); bp=$(cat "$WORK_DIR/basepath" 2>/dev/null || true)
+    json=$(curl -s --max-time 8 -b "$ck" "http://127.0.0.1:${port}/${bp}/api/argo" 2>/dev/null || echo '[]'); rm -f "$ck"
+    if command -v python3 >/dev/null 2>&1; then
+      echo "$json" | python3 -c 'import json,sys; a=json.load(sys.stdin); print("  %-4s %-7s %-7s %-28s %-18s %s"%("ID","协议","模式","域名","出口","状态")); [print("  %-4s %-7s %-7s %-28s %-18s %s"%(x.get("id",""),x.get("protocol",""),x.get("mode",""),x.get("hostname","") or "(等待)",x.get("exit_host",""),x.get("status",""))) for x in a]' 2>/dev/null || echo '  无法解析 Argo 列表'
+    else
+      echo "$json"
+    fi
+    echo; echo "  1) 新建 VLESS Argo"; echo "  2) 新建 VMess Argo"; echo "  3) 启动 Argo"; echo "  4) 停止 Argo"; echo "  5) 删除 Argo"; echo "  6) 查看节点"; echo "  0) 返回"
+    read -rp "  选择: " choice
+    case "$choice" in
+      1|2)
+        protocol=vless; [[ "$choice" == 2 ]] && protocol=vmess
+        echo; echo "  选择模式: 1) 固定 Tunnel  2) Quick Tunnel"; read -rp "  模式: " mode
+        [[ "$mode" == 1 ]] && mode=fixed || mode=quick
+        read -rp "  fanout 出口 HostName: " exit
+        [[ -z "$exit" ]] && { echo "  必须指定出口 HostName"; pause; continue; }
+        host=""; token=""
+        if [[ "$mode" == fixed ]]; then read -rp "  Argo 域名: " host; read -rsp "  Tunnel Token: " token; echo; fi
+        ck=$(argo_api_login); resp=$(curl -s --max-time 30 -b "$ck" -X POST "http://127.0.0.1:${port}/${bp}/api/argo?protocol=${protocol}&mode=${mode}&hostname=${host}&token=${token}&exit=${exit}"); rm -f "$ck"; echo; echo "$resp"; pause;;
+      3|4)
+        read -rp "  Argo ID: " id; action=start; [[ "$choice" == 4 ]] && action=stop
+        ck=$(argo_api_login); resp=$(curl -s --max-time 15 -b "$ck" -X PUT "http://127.0.0.1:${port}/${bp}/api/argo?id=${id}&action=${action}"); rm -f "$ck"; echo "$resp"; pause;;
+      5)
+        read -rp "  Argo ID: " id; read -rp "  确认删除？[y/N]: " yes; [[ ${yes,,} == y ]] || continue
+        ck=$(argo_api_login); resp=$(curl -s --max-time 15 -b "$ck" -X DELETE "http://127.0.0.1:${port}/${bp}/api/argo?id=${id}"); rm -f "$ck"; echo "$resp"; pause;;
+      6)
+        echo; echo "$json" | grep -o '"link":"[^"]*"' | sed 's/^"link":"//;s/"$//' | sed 's#\\u0026#\&#g'; pause;;
+      0) return;;
+    esac
+  done
+}
+
 menu() {
   while true; do
     clear
@@ -408,7 +347,7 @@ menu() {
     echo
     echo "  11) 更新         12) 卸载"
     echo "  13) 交流群 / 反馈"
-  echo "  14) Argo 节点"
+    echo "  14) Argo 节点"
     echo "   0) 退出"
     echo -e "${D}  ─────────────────────────────${N}"
     read -rp "  选择: " choice
@@ -434,6 +373,7 @@ menu() {
         pause ;;
       11) do_update; pause ;;
       13) show_links; pause ;;
+      14) argo_menu ;;
       12) do_uninstall; pause ;;
       0) exit 0 ;;
       *) ;;
@@ -454,9 +394,10 @@ case "${1:-}" in
   list)     list_tunnels ;;
   update)   do_update ;;
   uninstall) do_uninstall ;;
+  argo) argo_menu ;;
   "")       menu ;;
   *)
-    echo "用法: f [start|stop|restart|status|log|info|list|argo|update|uninstall]"
+    echo "用法: f [start|stop|restart|status|log|info|list|update|uninstall|argo]"
     echo "不带参数进入交互菜单"
     ;;
 esac

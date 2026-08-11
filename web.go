@@ -196,7 +196,6 @@ textarea:focus{outline:none;border-color:var(--accent)}
   <h1>fanout</h1>
   <span class="count" id="panel"></span>
   <span class="spacer"></span>
-  <button class="icon" id="argoBtn" title="Argo 节点">Argo</button>
   <button class="icon" id="settingsBtn" title="设置">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
   </button>
@@ -204,7 +203,7 @@ textarea:focus{outline:none;border-color:var(--accent)}
     <a href="https://t.me/+ft-zI76oovgwNmRh" target="_blank" rel="noopener">交流群</a>
     <a href="https://youtube.com/@joeyblog" target="_blank" rel="noopener">油管</a>
     <a href="https://joeyblog.net" target="_blank" rel="noopener">博客</a>
-    <a href="https://github.com/YOUR_GITHUB_USERNAME/fanout-argo" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/byJoey/fanout" target="_blank" rel="noopener">GitHub</a>
   </nav>
 </header>
 
@@ -427,39 +426,6 @@ textarea:focus{outline:none;border-color:var(--accent)}
       </button>
     </div>
     <div class="body"><textarea id="exbox" spellcheck="false" readonly></textarea></div>
-  </div>
-</div>
-
-
-<div class="modal" id="argo">
-  <div class="sheet">
-    <div class="head">
-      <h2>Argo 节点</h2>
-      <span class="spacer"></span>
-      <button class="icon" data-close="argo" title="关闭">
-        <svg viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-      </button>
-    </div>
-    <div class="body">
-      <div id="argolist"></div>
-      <div class="editbar">
-        <label class="ef"><span>协议</span>
-          <select id="aproto"><option value="vless">VLESS-WS</option><option value="vmess">VMess-WS</option></select></label>
-        <label class="ef"><span>fanout 出口</span><select id="ahost"></select></label>
-      </div>
-      <label class="f" style="margin-top:12px"><span>固定 Argo 域名</span>
-        <input id="ahostname" type="text" placeholder="例如 argo.example.com；留空使用 Quick Tunnel"></label>
-      <label class="f"><span>Cloudflare Tunnel Token</span>
-        <input id="atoken" type="password" spellcheck="false" autocomplete="off" placeholder="固定 Argo 必填；Quick Tunnel 留空"></label>
-      <label class="f"><span>WebSocket 路径</span>
-        <input id="apath" type="text" placeholder="留空自动随机，例如 /argo"></label>
-      <div class="hint">Argo 只负责入口；节点流量仍按你选择的 fanout 出口经 VPN Gate 出站。固定 Tunnel 的域名需要在 Cloudflare Tunnel 中把服务指向本机 Xray WS 端口。</div>
-    </div>
-    <div class="foot">
-      <span class="spacer"></span>
-      <button data-close="argo">关闭</button>
-      <button class="primary" id="argoCreate">创建 Argo</button>
-    </div>
   </div>
 </div>
 
@@ -1183,80 +1149,6 @@ $('#exportAll').onclick = async () => {
   }catch(err){ $('#exbox').value = '导出失败: ' + err.message; }
 };
 $('#copyall').onclick = () => { const v = $('#exbox').value; if(v) copy(v); };
-
-// ---- Argo ----
-function argoStatusText(x){
-  return (x.status || '-') + (x.error ? ' · ' + x.error : '');
-}
-function renderArgo(list){
-  const box = $('#argolist');
-  if(!list.length){
-    box.innerHTML = '<div class="empty">还没有 Argo 节点</div>';
-    return;
-  }
-  box.innerHTML = list.map(x =>
-    '<div class="client"><div class="crow"><strong class="cemail">'
-    + esc(x.name || ('Argo-' + x.id)) + '</strong><span class="count">'
-    + esc(x.protocol || '') + ' → ' + esc(x.tunnel_host || '') + ' · '
-    + esc(argoStatusText(x)) + '</span><span class="spacer"></span>'
-    + '<button class="icon" data-astart="' + x.id + '">启动</button>'
-    + '<button class="icon" data-astop="' + x.id + '">停止</button>'
-    + '<button class="icon danger" data-adel="' + x.id + '">删除</button></div>'
-    + (x.link ? '<div class="share">' + esc(x.link)
-      + '<br><button data-copy="' + esc(x.link) + '">复制节点</button></div>' : '')
-    + (x.hostname ? '<div class="hint">域名：' + esc(x.hostname) + ' · 端口：443 · WS：' + esc(x.path || '/') + '</div>' : '')
-    + '</div>'
-  ).join('');
-}
-async function loadArgo(){
-  const list = await api('/api/argo');
-  renderArgo(list || []);
-  const tv = await api('/api/tunnels');
-  const sel = $('#ahost');
-  const up = (tv || []).filter(x => x.status === 'up');
-  sel.innerHTML = up.length ? up.map(x =>
-    '<option value="' + esc(x.node.hostname) + '">' + esc(x.node.region || '')
-    + ' · ' + esc(x.node.hostname) + ' · ' + esc(x.exit_ip || '') + '</option>').join('')
-    : '<option value="">没有运行中的 fanout 出口</option>';
-}
-$('#argoBtn').onclick = async () => {
-  openModal('argo');
-  try{ await loadArgo(); }catch(e){ toast('读取 Argo 失败: ' + e.message, true); }
-};
-$('#argoCreate').onclick = async e => {
-  e.target.disabled = true;
-  try{
-    const body = new URLSearchParams({
-      protocol: $('#aproto').value,
-      tunnel_host: $('#ahost').value,
-      hostname: $('#ahostname').value.trim(),
-      token: $('#atoken').value,
-      path: $('#apath').value.trim()
-    });
-    const x = await api('/api/argo/create', {
-      method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body
-    });
-    toast(x.link ? 'Argo 已创建' : 'Argo 已创建，正在等待域名');
-    $('#atoken').value = '';
-    await loadArgo();
-    poll();
-  }catch(err){ toast(err.message, true); }
-  e.target.disabled = false;
-};
-document.addEventListener('click', async e => {
-  const st = e.target.closest('[data-astart]');
-  const sp = e.target.closest('[data-astop]');
-  const dl = e.target.closest('[data-adel]');
-  try{
-    if(st){ await api('/api/argo/start?id=' + st.dataset.astart, {method:'POST'}); await loadArgo(); }
-    if(sp){ await api('/api/argo/stop?id=' + sp.dataset.astop, {method:'POST'}); await loadArgo(); }
-    if(dl && confirm('删除这个 Argo 及对应 Xray 入站？')){
-      await api('/api/argo/delete?id=' + dl.dataset.adel, {method:'POST'}); await loadArgo(); poll();
-    }
-  }catch(err){ toast(err.message, true); }
-});
 
 // ---- 设置：改密码 / 改路径 / 改端口 / 改本地监听 ----
 let curSettings = null;

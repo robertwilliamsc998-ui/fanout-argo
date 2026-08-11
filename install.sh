@@ -140,12 +140,7 @@ if [[ ${#need_cmd[@]} -gt 0 ]]; then
 fi
 
 echo "[2/6] 获取程序"
-REPO="${REPO:-${FANOUT_REPO:-YOUR_GITHUB_USERNAME/fanout-argo}}"
-if [[ "$REPO" == *YOUR_GITHUB_USERNAME* ]]; then
-  echo "请先把 REPO/FANOUT_REPO 设置为你自己的 GitHub 仓库，例如：" >&2
-  echo "  FANOUT_REPO=yourname/fanout-argo bash <(curl -fsSL https://raw.githubusercontent.com/yourname/fanout-argo/main/install.sh)" >&2
-  exit 1
-fi
+REPO="${REPO:-robertwilliamsc998-ui/fanout-argo}"
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  GOARCH=amd64 ;;
@@ -210,7 +205,7 @@ else
   rm -rf "$XT"
 fi
 
-echo "[4/6] 准备 Cloudflare Tunnel"
+echo "[4/7] 准备 Cloudflare Tunnel"
 mkdir -p "${WORK_DIR}/bin"
 case "$GOARCH" in
   amd64) CF_ASSET=cloudflared-linux-amd64 ;;
@@ -227,7 +222,7 @@ else
     chmod 755 "${WORK_DIR}/bin/cloudflared"
     echo "      ${WORK_DIR}/bin/cloudflared"
   else
-    echo "      cloudflared 下载失败，fanout 原功能不受影响；需要 Argo 时请手动安装" >&2
+    echo "      cloudflared 下载失败；fanout 原功能仍可用，Argo 创建前请手动安装" >&2
     rm -f "${WORK_DIR}/bin/cloudflared"
   fi
 fi
@@ -260,7 +255,7 @@ chmod 700 "$WORK_DIR"
 svc_install
 svc_enable_start
 
-echo "[7/7] 就绪"
+echo "[6/6] 就绪"
 sleep 3
 svc_is_active && echo "      服务运行中（${INIT_SYS}）" || {
   echo "      服务启动失败，看 $(svc_logs_hint)" >&2
@@ -289,5 +284,5 @@ echo "  ────────────────────────
 echo "  交流群  https://t.me/+ft-zI76oovgwNmRh"
 echo "  油管    https://youtube.com/@joeyblog"
 echo "  博客    https://joeyblog.net"
-echo "  项目    https://github.com/${REPO}"
+echo "  项目    https://github.com/robertwilliamsc998-ui/fanout-argo"
 echo

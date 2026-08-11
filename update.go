@@ -19,15 +19,7 @@ import (
 	"time"
 )
 
-func updateRepo() string {
-	if v := strings.TrimSpace(os.Getenv("FANOUT_REPO")); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(os.Getenv("REPO")); v != "" {
-		return v
-	}
-	return "YOUR_GITHUB_USERNAME/fanout-argo"
-}
+const updateRepo = "byJoey/fanout"
 
 // releaseInfo 是 GitHub Releases API 里我们关心的字段。
 type releaseInfo struct {
@@ -64,7 +56,7 @@ func assetArch() string {
 
 // fetchLatestRelease 拉取最新 release 元数据。
 func fetchLatestRelease() (*releaseInfo, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", updateRepo())
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", updateRepo)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

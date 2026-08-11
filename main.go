@@ -15,9 +15,7 @@ import (
 )
 
 // version 由构建时通过 -ldflags 注入。
-var version = "fanout-argo-dev"
-
-var globalArgo *argoManager
+var version = "dev"
 
 func main() {
 	var (
@@ -66,12 +64,6 @@ func main() {
 		log.Printf("已获取 %d 个节点", n)
 	}
 
-	argoMgr, err := newArgoManager(*workDir)
-	if err != nil {
-		log.Fatalf("初始化 Argo 配置失败: %v", err)
-	}
-	globalArgo = argoMgr
-
 	if n, err := mgr.restoreState(); err != nil {
 		log.Printf("恢复上次状态失败: %v", err)
 	} else if n > 0 {
@@ -82,15 +74,17 @@ func main() {
 	}
 
 	go mgr.WatchHealth()
-	argoMgr.startAll()
 
+	var argoMgr *ArgoManager
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-stop
 		log.Println("正在清理所有隧道...")
 		mgr.Shutdown()
-		argoMgr.close()
+		if argoMgr != nil {
+			argoMgr.Close()
+		}
 		closePanel()
 		os.Exit(0)
 	}()
@@ -108,11 +102,6 @@ func main() {
 	mux.HandleFunc("/api/provision", apiProvision(mgr))
 	mux.HandleFunc("/api/jobs", apiJobs(mgr))
 	mux.HandleFunc("/api/jobs/dismiss", apiJobDismiss(mgr))
-	mux.HandleFunc("/api/argo", apiArgo())
-	mux.HandleFunc("/api/argo/create", apiArgoCreate(mgr))
-	mux.HandleFunc("/api/argo/start", apiArgoStart())
-	mux.HandleFunc("/api/argo/stop", apiArgoStop())
-	mux.HandleFunc("/api/argo/delete", apiArgoDelete(mgr))
 	mux.HandleFunc("/api/exits", apiExits(mgr))
 	mux.HandleFunc("/api/xui", apiXUIStatus)
 	mux.HandleFunc("/api/xui/inbounds", apiXUIInbounds(mgr))
@@ -126,6 +115,15 @@ func main() {
 	mux.HandleFunc("/api/panel/client/add", apiClientAdd(mgr))
 	mux.HandleFunc("/api/panel/client/del", apiClientDelete(mgr))
 	mux.HandleFunc("/api/panel/client/reset", apiClientReset(mgr))
+	if p, e := openPanel(); e != nil {
+		log.Printf("Argo 管理器不可用: %v", e)
+	} else if am, e := newArgoManager(*workDir, mgr, p); e != nil {
+		log.Printf("Argo 管理器初始化失败: %v", e)
+	} else {
+		argoMgr = am
+		argoMgr.Restore()
+		mux.HandleFunc("/api/argo", apiArgo(argoMgr))
+	}
 
 	auth, created, err := NewAuth(*workDir)
 	if err != nil {
@@ -165,6 +163,64 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func apiArgo(a *ArgoManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, a.list())
+		case http.MethodPost:
+			protocol := q.Get("protocol")
+			mode := q.Get("mode")
+			hostname := q.Get("hostname")
+			token := q.Get("token")
+			exitHost := q.Get("exit")
+			x, err := a.Create(protocol, mode, hostname, token, exitHost)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, x)
+		case http.MethodDelete:
+			id, err := strconv.Atoi(q.Get("id"))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id 无效"})
+				return
+			}
+			if err := a.Delete(id); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"ok": "已删除"})
+		case http.MethodPut:
+			id, err := strconv.Atoi(q.Get("id"))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id 无效"})
+				return
+			}
+			var e error
+			if q.Get("action") == "stop" {
+				e = a.Stop(id)
+			} else {
+				e = a.Start(id)
+			}
+			if e != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": e.Error()})
+				return
+			}
+			for _, x := range a.list() {
+				if x.ID == id {
+					writeJSON(w, http.StatusOK, x)
+					return
+				}
+			}
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "Argo 不存在"})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}
 }
 
 func apiNodes(m *Manager) http.HandlerFunc {
@@ -781,102 +837,5 @@ func apiInboundCreate(m *Manager) http.HandlerFunc {
 			"network":  ib.Network,
 			"security": ib.Security,
 		})
-	}
-}
-
-// apiArgo lists the optional Cloudflare Tunnel front-ends.
-func apiArgo() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if globalArgo == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Argo 未初始化"})
-			return
-		}
-		writeJSON(w, http.StatusOK, globalArgo.list())
-	}
-}
-
-func apiArgoCreate(m *Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if globalArgo == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Argo 未初始化"})
-			return
-		}
-		var req ArgoCreateRequest
-		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
-			_ = r.ParseForm()
-			req.Protocol = r.Form.Get("protocol")
-			req.TunnelHost = r.Form.Get("tunnel_host")
-			req.Hostname = r.Form.Get("hostname")
-			req.Token = r.Form.Get("token")
-			req.Path = r.Form.Get("path")
-		} else if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式无效"})
-			return
-		}
-		x, err := globalArgo.create(m, req)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		invalidateInbounds()
-		writeJSON(w, http.StatusOK, x)
-	}
-}
-
-func apiArgoStart() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if globalArgo == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Argo 未初始化"})
-			return
-		}
-		id, err := strconv.Atoi(r.URL.Query().Get("id"))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id 无效"})
-			return
-		}
-		if err := globalArgo.startOne(id); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"ok": "已启动"})
-	}
-}
-
-func apiArgoStop() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if globalArgo == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Argo 未初始化"})
-			return
-		}
-		id, err := strconv.Atoi(r.URL.Query().Get("id"))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id 无效"})
-			return
-		}
-		if err := globalArgo.stop(id); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"ok": "已停止"})
-	}
-}
-
-func apiArgoDelete(m *Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if globalArgo == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Argo 未初始化"})
-			return
-		}
-		id, err := strconv.Atoi(r.URL.Query().Get("id"))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id 无效"})
-			return
-		}
-		if err := globalArgo.delete(m, id); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		invalidateInbounds()
-		writeJSON(w, http.StatusOK, map[string]string{"ok": "已删除"})
 	}
 }
