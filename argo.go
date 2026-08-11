@@ -273,6 +273,7 @@ func (a *ArgoManager) watchProcess(id int, f *os.File) {
 			x.Error = err.Error()
 		}
 		_ = a.saveLocked()
+		a.writeInfoLocked()
 		go func() {
 			time.Sleep(5 * time.Second)
 			a.mu.Lock()
@@ -282,8 +283,9 @@ func (a *ArgoManager) watchProcess(id int, f *os.File) {
 				if e := a.startLocked(cur); e != nil {
 					cur.Status = "down"
 					cur.Error = e.Error()
-					_ = a.saveLocked()
 				}
+				_ = a.saveLocked()
+				a.writeInfoLocked()
 			}
 		}()
 	}
@@ -302,10 +304,15 @@ func (a *ArgoManager) waitQuickHostname(id int, logp string) {
 		if m != "" {
 			a.mu.Lock()
 			x := a.find(id)
-			if x != nil && x.Hostname == "" {
+			if x != nil && !x.Disabled && x.Status != "stopped" && x.Hostname == "" {
 				x.Hostname = strings.TrimPrefix(m, "https://")
-				x.Link = argoLink(x)
-				x.Status = "up"
+				if err := a.refreshLinkLocked(x); err != nil {
+					// UUID 暂时不可用时仍保存域名；后台恢复任务会补齐链接。
+					x.Link = ""
+					go a.retryRefreshLink(id)
+				} else {
+					x.Status = "up"
+				}
 				a.writeInfoLocked()
 				_ = a.saveLocked()
 			}
@@ -322,7 +329,26 @@ func (a *ArgoManager) Start(id int) error {
 	if x == nil {
 		return errors.New("Argo 不存在")
 	}
-	return a.startLocked(x)
+	// Start 是显式的人工启动操作，应解除 Stop() 设置的 Disabled 标记，
+	// 否则节点第一次手动停止后将无法通过 Start 或重启恢复。
+	x.Disabled = false
+	x.Status = "starting"
+	x.Error = ""
+	if err := a.refreshLinkLocked(x); err != nil {
+		// Xray/3x-ui 可能仍在启动，先记录错误并继续尝试启动 cloudflared；
+		// 后台重试会在面板恢复后重新取得 UUID 和节点链接。
+		go a.retryRefreshLink(x.ID)
+	}
+	if err := a.startLocked(x); err != nil {
+		x.Status = "down"
+		x.Error = err.Error()
+		_ = a.saveLocked()
+		a.writeInfoLocked()
+		return err
+	}
+	_ = a.saveLocked()
+	a.writeInfoLocked()
+	return nil
 }
 func (a *ArgoManager) Stop(id int) error {
 	a.mu.Lock()
