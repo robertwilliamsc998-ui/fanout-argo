@@ -201,8 +201,15 @@ func (a *ArgoManager) writeInfoLocked() {
 func (a *ArgoManager) publicCopyLocked(x *Argo) *Argo { y := *x; y.Token = ""; y.PID = 0; return &y }
 
 func (a *ArgoManager) startLocked(x *Argo) error {
+	if x.Disabled {
+		return errors.New("Argo 已停止，请先执行启动")
+	}
 	if p := a.procs[x.ID]; p != nil && p.Process != nil {
-		return nil
+		// 如果旧进程已经退出但 watcher 尚未清理，这里不要重复启动。
+		if err := p.Process.Signal(syscall.Signal(0)); err == nil {
+			return nil
+		}
+		delete(a.procs, x.ID)
 	}
 	bin := a.binary()
 	if _, err := exec.LookPath(bin); err != nil {
@@ -236,90 +243,125 @@ func (a *ArgoManager) startLocked(x *Argo) error {
 	}
 	x.PID = cmd.Process.Pid
 	a.procs[x.ID] = cmd
-	x.Status = "up"
+	x.Status = "starting"
 	x.Error = ""
-	if x.Mode == "quick" {
-		go a.watchProcess(x.ID, f)
-	} else {
-		go a.watchProcess(x.ID, f)
-	}
 	_ = a.saveLocked()
+
+	// 传入具体 cmd，防止 Stop -> Start 的竞态让旧 watcher 错误拉起第二个进程。
+	go a.watchProcess(x.ID, cmd, f)
 	if x.Mode == "quick" {
 		go a.waitQuickHostname(x.ID, logp)
+	} else {
+		x.Status = "up"
+		_ = a.saveLocked()
+		a.writeInfoLocked()
 	}
 	return nil
 }
 
-func (a *ArgoManager) watchProcess(id int, f *os.File) {
-	a.mu.Lock()
-	p := a.procs[id]
-	a.mu.Unlock()
-	if p == nil {
-		return
-	}
-	err := p.Wait()
+func (a *ArgoManager) watchProcess(id int, cmd *exec.Cmd, f *os.File) {
+	err := cmd.Wait()
 	f.Close()
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	// 如果当前映射已经指向另一个新进程，说明这是旧进程的 watcher，不能干扰新实例。
+	if current := a.procs[id]; current != cmd {
+		return
+	}
 	delete(a.procs, id)
 	x := a.find(id)
 	if x == nil {
 		return
 	}
 	x.PID = 0
-	if x.Status != "stopped" {
-		x.Status = "down"
-		if err != nil {
-			x.Error = err.Error()
+
+	if x.Disabled || x.Status == "stopped" {
+		_ = a.saveLocked()
+		a.writeInfoLocked()
+		return
+	}
+
+	x.Status = "down"
+	if err != nil {
+		x.Error = err.Error()
+	}
+	_ = a.saveLocked()
+	a.writeInfoLocked()
+
+	// 非人工停止才自动恢复。恢复前重新同步 UUID，避免 Xray 重启后 clientID 为空。
+	go func() {
+		time.Sleep(5 * time.Second)
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		cur := a.find(id)
+		if cur == nil || cur.Disabled || cur.Status == "stopped" {
+			return
+		}
+		cur.Status = "starting"
+		if e := a.refreshLinkLocked(cur); e != nil {
+			cur.Error = "恢复客户端 UUID 失败: " + e.Error()
+			go a.retryRefreshLink(id)
+		}
+		if e := a.startLocked(cur); e != nil {
+			cur.Status = "down"
+			cur.Error = e.Error()
 		}
 		_ = a.saveLocked()
 		a.writeInfoLocked()
-		go func() {
-			time.Sleep(5 * time.Second)
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			if cur := a.find(id); cur != nil && cur.Status != "stopped" {
-				cur.Status = "starting"
-				if e := a.startLocked(cur); e != nil {
-					cur.Status = "down"
-					cur.Error = e.Error()
-				}
-				_ = a.saveLocked()
-				a.writeInfoLocked()
-			}
-		}()
-	}
+	}()
 }
 
 var tryCloudflareRE = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
 
 func (a *ArgoManager) waitQuickHostname(id int, logp string) {
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ {
 		time.Sleep(time.Second)
 		b, e := os.ReadFile(logp)
 		if e != nil {
 			continue
 		}
 		m := tryCloudflareRE.FindString(string(b))
-		if m != "" {
-			a.mu.Lock()
-			x := a.find(id)
-			if x != nil && !x.Disabled && x.Status != "stopped" && x.Hostname == "" {
-				x.Hostname = strings.TrimPrefix(m, "https://")
-				if err := a.refreshLinkLocked(x); err != nil {
-					// UUID 暂时不可用时仍保存域名；后台恢复任务会补齐链接。
-					x.Link = ""
-					go a.retryRefreshLink(id)
-				} else {
-					x.Status = "up"
-				}
-				a.writeInfoLocked()
-				_ = a.saveLocked()
-			}
+		if m == "" {
+			continue
+		}
+
+		a.mu.Lock()
+		x := a.find(id)
+		if x == nil || x.Disabled || x.Status == "stopped" {
 			a.mu.Unlock()
 			return
 		}
+		host := strings.TrimPrefix(m, "https://")
+		x.Hostname = host
+		if err := a.refreshLinkLocked(x); err != nil {
+			x.Link = ""
+			x.Status = "starting"
+			x.Error = "恢复客户端 UUID 失败: " + err.Error()
+			_ = a.saveLocked()
+			a.writeInfoLocked()
+			a.mu.Unlock()
+			go a.retryRefreshLink(id)
+			return
+		}
+		x.Status = "up"
+		x.Error = ""
+		x.Link = argoLink(x)
+		_ = a.saveLocked()
+		a.writeInfoLocked()
+		a.mu.Unlock()
+		return
 	}
+
+	a.mu.Lock()
+	if x := a.find(id); x != nil && !x.Disabled && x.Status != "stopped" && x.Hostname == "" {
+		x.Status = "down"
+		x.Error = "Quick Tunnel 60 秒内未获取到 trycloudflare.com 域名"
+		_ = a.saveLocked()
+		a.writeInfoLocked()
+	}
+	a.mu.Unlock()
 }
 
 func (a *ArgoManager) Start(id int) error {
@@ -330,17 +372,20 @@ func (a *ArgoManager) Start(id int) error {
 		return errors.New("Argo 不存在")
 	}
 
-	// Start 是显式人工启动：解除 Stop() 设置的 Disabled 标记。
+	// 显式启动 = 解除人工 Stop 的 Disabled 状态。
 	x.Disabled = false
 	x.Status = "starting"
 	x.Error = ""
 
-	// 先尝试恢复 UUID；如果 Xray/面板仍在启动，后台重试会继续处理。
 	if err := a.refreshLinkLocked(x); err != nil {
 		x.Error = "恢复客户端 UUID 失败: " + err.Error()
 		go a.retryRefreshLink(x.ID)
 	}
-
+	if x.Mode == "quick" {
+		// Quick Tunnel 每次重新启动都可能得到新域名；旧链接必须作废。
+		x.Hostname = ""
+		x.Link = ""
+	}
 	if err := a.startLocked(x); err != nil {
 		x.Status = "down"
 		x.Error = err.Error()
@@ -364,8 +409,11 @@ func (a *ArgoManager) Stop(id int) error {
 	x.Disabled = true
 	if p := a.procs[id]; p != nil && p.Process != nil {
 		_ = p.Process.Signal(syscall.SIGTERM)
+		// 立即从当前进程映射移除。旧 watcher 会识别到映射变化，不会自动重启。
+		delete(a.procs, id)
 	}
 	x.PID = 0
+	x.Error = ""
 	err := a.saveLocked()
 	a.writeInfoLocked()
 	return err
@@ -406,16 +454,14 @@ func (a *ArgoManager) Restore() {
 			continue
 		}
 
-		// clientID 不写入 argo.json。VPS 重启后必须从 Xray 入站重新读取，
-		// 否则恢复出来的 VLESS/VMess 节点会因为 UUID 为空而失效。
-		// 这里先同步尝试一次；面板尚未就绪时由后台重试接管。
+		// clientID 不持久化。每次 VPS 启动都从 Xray 入站重新取得真实 UUID。
 		if err := a.refreshLinkLocked(x); err != nil {
 			x.Error = "恢复客户端 UUID 失败: " + err.Error()
 			go a.retryRefreshLink(x.ID)
 		}
 
 		if x.Mode == "quick" {
-			// Quick Tunnel 每次启动都会获得新的 trycloudflare.com 域名。
+			// Quick Tunnel 域名重启后会变化，旧域名和旧链接不能继续使用。
 			x.Hostname = ""
 			x.Link = ""
 		}
@@ -431,8 +477,8 @@ func (a *ArgoManager) Restore() {
 }
 
 // retryRefreshLink 在 VPS 重启、Xray/3x-ui/native 面板尚未完全就绪时，
-// 用递增间隔重新读取入站客户端 UUID。成功后立即重建节点链接并刷新 info.txt。
-// 总等待时间约 60 秒，避免开机时序导致节点永久失效。
+// 重新读取入站客户端 UUID。成功后立即重建节点链接并刷新 info.txt。
+// 总等待时间约 60 秒。
 func (a *ArgoManager) retryRefreshLink(id int) {
 	waits := []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second}
 	for _, wait := range waits {
@@ -440,7 +486,7 @@ func (a *ArgoManager) retryRefreshLink(id int) {
 
 		a.mu.Lock()
 		x := a.find(id)
-		if x == nil || x.Disabled {
+		if x == nil || x.Disabled || x.Status == "stopped" {
 			a.mu.Unlock()
 			return
 		}
@@ -450,15 +496,25 @@ func (a *ArgoManager) retryRefreshLink(id int) {
 			if x.Mode == "quick" && x.Hostname != "" {
 				x.Link = argoLink(x)
 			}
-			a.writeInfoLocked()
 			_ = a.saveLocked()
+			a.writeInfoLocked()
 			a.mu.Unlock()
 			return
 		}
 		x.Error = "恢复客户端 UUID 失败: " + err.Error()
 		_ = a.saveLocked()
+		a.writeInfoLocked()
 		a.mu.Unlock()
 	}
+
+	a.mu.Lock()
+	if x := a.find(id); x != nil && !x.Disabled && x.Status != "stopped" {
+		x.Status = "down"
+		x.Error = "Xray 客户端 UUID 在约 60 秒内仍未恢复"
+		_ = a.saveLocked()
+		a.writeInfoLocked()
+	}
+	a.mu.Unlock()
 }
 
 func (a *ArgoManager) Close() {
