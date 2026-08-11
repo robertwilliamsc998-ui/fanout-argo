@@ -380,7 +380,11 @@ func (a *ArgoManager) Start(id int) error {
 
 	if err := a.refreshLinkLocked(x); err != nil {
 		x.Error = "恢复客户端 UUID 失败: " + err.Error()
+		x.Status = "starting"
 		a.scheduleRetryLocked(x.ID)
+		_ = a.saveLocked()
+		a.writeInfoLocked()
+		return err
 	}
 	if x.Mode == "quick" {
 		// Quick Tunnel 每次重新启动都可能得到新域名；旧链接必须作废。
@@ -460,7 +464,9 @@ func (a *ArgoManager) Restore() {
 		// clientID 不持久化。每次 VPS 启动都从 Xray 入站重新取得真实 UUID。
 		if err := a.refreshLinkLocked(x); err != nil {
 			x.Error = "恢复客户端 UUID 失败: " + err.Error()
+			x.Status = "starting"
 			a.scheduleRetryLocked(x.ID)
+			continue
 		}
 
 		if x.Mode == "quick" {
@@ -514,7 +520,19 @@ func (a *ArgoManager) retryRefreshLink(id int) {
 		err := a.refreshLinkLocked(x)
 		if err == nil {
 			x.Error = ""
-			if x.Mode == "quick" && x.Hostname != "" {
+			// UUID 恢复成功后再启动 Tunnel。Start/Restore 在 UUID 不可用时
+			// 不会提前启动 cloudflared，避免出现 Tunnel 已在线但节点 UUID 无效的状态。
+			if p := a.procs[id]; p == nil || p.Process == nil {
+				x.Status = "starting"
+				if e := a.startLocked(x); e != nil {
+					x.Status = "down"
+					x.Error = e.Error()
+					_ = a.saveLocked()
+					a.writeInfoLocked()
+					a.mu.Unlock()
+					return
+				}
+			} else if x.Mode == "quick" && x.Hostname != "" {
 				x.Link = argoLink(x)
 			}
 			_ = a.saveLocked()
