@@ -1,0 +1,16 @@
+[Unit]
+Description=fanout - VPN Gate 出口扇出网关
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fanout -web 8899 -dir /var/lib/fanout
+Restart=on-failure
+RestartSec=5
+# 退出时给足时间清理 netns 与 openvpn 子进程
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
