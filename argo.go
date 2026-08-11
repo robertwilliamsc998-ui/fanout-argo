@@ -329,16 +329,18 @@ func (a *ArgoManager) Start(id int) error {
 	if x == nil {
 		return errors.New("Argo 不存在")
 	}
-	// Start 是显式的人工启动操作，应解除 Stop() 设置的 Disabled 标记，
-	// 否则节点第一次手动停止后将无法通过 Start 或重启恢复。
+
+	// Start 是显式人工启动：解除 Stop() 设置的 Disabled 标记。
 	x.Disabled = false
 	x.Status = "starting"
 	x.Error = ""
+
+	// 先尝试恢复 UUID；如果 Xray/面板仍在启动，后台重试会继续处理。
 	if err := a.refreshLinkLocked(x); err != nil {
-		// Xray/3x-ui 可能仍在启动，先记录错误并继续尝试启动 cloudflared；
-		// 后台重试会在面板恢复后重新取得 UUID 和节点链接。
+		x.Error = "恢复客户端 UUID 失败: " + err.Error()
 		go a.retryRefreshLink(x.ID)
 	}
+
 	if err := a.startLocked(x); err != nil {
 		x.Status = "down"
 		x.Error = err.Error()
@@ -350,6 +352,7 @@ func (a *ArgoManager) Start(id int) error {
 	a.writeInfoLocked()
 	return nil
 }
+
 func (a *ArgoManager) Stop(id int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -361,7 +364,6 @@ func (a *ArgoManager) Stop(id int) error {
 	x.Disabled = true
 	if p := a.procs[id]; p != nil && p.Process != nil {
 		_ = p.Process.Signal(syscall.SIGTERM)
-		delete(a.procs, id)
 	}
 	x.PID = 0
 	err := a.saveLocked()
@@ -377,7 +379,6 @@ func (a *ArgoManager) Delete(id int) error {
 	}
 	if p := a.procs[id]; p != nil && p.Process != nil {
 		_ = p.Process.Signal(syscall.SIGTERM)
-		delete(a.procs, id)
 	}
 	if err := a.panel.DeleteInbounds([]int{x.InboundID}, a.mgr.Tunnels()); err != nil {
 		return err
@@ -401,14 +402,15 @@ func (a *ArgoManager) Restore() {
 	for _, x := range a.store.Argo {
 		if x.Disabled {
 			x.Status = "stopped"
+			x.PID = 0
 			continue
 		}
 
 		// clientID 不写入 argo.json。VPS 重启后必须从 Xray 入站重新读取，
 		// 否则恢复出来的 VLESS/VMess 节点会因为 UUID 为空而失效。
+		// 这里先同步尝试一次；面板尚未就绪时由后台重试接管。
 		if err := a.refreshLinkLocked(x); err != nil {
 			x.Error = "恢复客户端 UUID 失败: " + err.Error()
-			// 不因为面板瞬时不可用而阻止 cloudflared 恢复；后台会继续重试。
 			go a.retryRefreshLink(x.ID)
 		}
 
@@ -418,6 +420,7 @@ func (a *ArgoManager) Restore() {
 			x.Link = ""
 		}
 		x.Status = "starting"
+		x.PID = 0
 		if err := a.startLocked(x); err != nil {
 			x.Status = "down"
 			x.Error = err.Error()
@@ -427,11 +430,13 @@ func (a *ArgoManager) Restore() {
 	a.writeInfoLocked()
 }
 
-// retryRefreshLink 在 VPS 重启、3x-ui/native 面板尚未完全就绪时，
-// 周期性重新读取入站客户端 UUID。恢复成功后立即重建节点链接。
+// retryRefreshLink 在 VPS 重启、Xray/3x-ui/native 面板尚未完全就绪时，
+// 用递增间隔重新读取入站客户端 UUID。成功后立即重建节点链接并刷新 info.txt。
+// 总等待时间约 60 秒，避免开机时序导致节点永久失效。
 func (a *ArgoManager) retryRefreshLink(id int) {
-	for i := 0; i < 12; i++ {
-		time.Sleep(5 * time.Second)
+	waits := []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second, 10 * time.Second}
+	for _, wait := range waits {
+		time.Sleep(wait)
 
 		a.mu.Lock()
 		x := a.find(id)
@@ -442,6 +447,9 @@ func (a *ArgoManager) retryRefreshLink(id int) {
 		err := a.refreshLinkLocked(x)
 		if err == nil {
 			x.Error = ""
+			if x.Mode == "quick" && x.Hostname != "" {
+				x.Link = argoLink(x)
+			}
 			a.writeInfoLocked()
 			_ = a.saveLocked()
 			a.mu.Unlock()
@@ -452,6 +460,7 @@ func (a *ArgoManager) retryRefreshLink(id int) {
 		a.mu.Unlock()
 	}
 }
+
 func (a *ArgoManager) Close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
