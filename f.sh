@@ -1,25 +1,36 @@
 #!/usr/bin/env bash
-# fanout 管理菜单兼容层：修复 Argo 节点输出，尤其是 VMess。
+# fanout 管理菜单兼容层。
+# 重要：本文件只负责从一个已知可工作的菜单基线加载脚本，再做一次安全补丁。
+# 不要让补丁脚本搜索自身的 Python 字符串，否则会再次把自己截断。
 set -euo pipefail
 
-BASE_URL="https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/main/f.sh"
+BASE_URL="https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/25ea599b477ce852ceddd4d888af2982824fb00e/f.sh"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
+
 curl -fsSL --max-time 30 "$BASE_URL" -o "$TMP"
 
 python3 - "$TMP" <<'PY'
 from pathlib import Path
 import sys
-p=Path(sys.argv[1])
-s=p.read_text()
-# 只匹配 host 配置行的稳定前缀，避免 Bash/Python 引号嵌套导致 SyntaxError。
-start=s.index('        host=""')
-end=s.index('      3|4)', start)
-new=r'''        host=""; token=""; node_port=""
+
+p = Path(sys.argv[1])
+s = p.read_text(encoding="utf-8")
+
+# 用旧版“隐藏 Token 输入”这一行作为定位锚点；它不会出现在补丁后的新代码里。
+marker = 'read -rsp "  Tunnel Token: " token'
+m = s.index(marker)
+start = s.rfind('        host=""', 0, m)
+end = s.index('      3|4)', m)
+
+if start < 0:
+    raise SystemExit("找不到 Argo 创建代码起点")
+
+new = r'''        host=""; token=""; node_port=""
         if [[ "$mode" == fixed ]]; then
           read -rp "  Argo 域名: " host
           echo
-          # Token 明文输入，方便边输入边校对；不再使用 read -s 隐藏字符，也不再二次显示。
+          # Token 明文输入，方便边输入边校对；不再使用 read -s 隐藏字符。
           read -rp "  Tunnel Token: " token
           echo
           while true; do
@@ -105,7 +116,11 @@ new=r'''        host=""; token=""; node_port=""
           python3 - "$1" "$host" "$protocol" <<'PY2'
 import base64,json,sys
 from urllib.parse import urlsplit,parse_qsl,unquote,urlencode
-link=sys.argv[1].strip(); argo_host=sys.argv[2].strip(); protocol=sys.argv[3].strip().lower(); preferred='www.wto.org'
+
+link=sys.argv[1].strip()
+argo_host=sys.argv[2].strip()
+protocol=sys.argv[3].strip().lower()
+preferred='www.wto.org'
 
 def vmess_from_uri(link):
     u=urlsplit(link)
@@ -114,27 +129,61 @@ def vmess_from_uri(link):
     uuid=unquote(u.username)
     q=dict(parse_qsl(u.query,keep_blank_values=True))
     path=q.get('path') or unquote(u.path) or '/argo'
-    obj={'v':'2','ps':q.get('remark') or q.get('name') or 'VMess-Argo','add':preferred,'port':'443','id':uuid,'aid':q.get('aid','0'),'scy':q.get('scy','auto'),'net':'ws','type':'none','host':argo_host,'path':path,'tls':'tls','sni':argo_host}
-    return 'vmess://'+base64.b64encode(json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode('utf-8')).decode('ascii')
+    obj={
+        'v':'2',
+        'ps':q.get('remark') or q.get('name') or 'VMess-Argo',
+        'add':preferred,
+        'port':'443',
+        'id':uuid,
+        'aid':q.get('aid','0'),
+        'scy':q.get('scy','auto'),
+        'net':'ws',
+        'type':'none',
+        'host':argo_host,
+        'path':path,
+        'tls':'tls',
+        'sni':argo_host,
+    }
+    raw=json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode('utf-8')
+    return 'vmess://'+base64.b64encode(raw).decode('ascii')
 
 def vmess_from_base64(link):
-    raw=link.split('://',1)[1].strip(); raw=unquote(raw); raw += '='*((-len(raw))%4)
+    raw=link.split('://',1)[1].strip()
+    raw=unquote(raw)
+    raw += '='*((-len(raw))%4)
     decoded=base64.b64decode(raw.encode('ascii'),altchars=b'-_',validate=False)
     obj=json.loads(decoded.decode('utf-8-sig'))
-    obj['add']=preferred; obj['port']='443'; obj['net']='ws'; obj['type']='none'; obj['tls']='tls'; obj['host']=argo_host; obj['sni']=argo_host; obj['path']=obj.get('path') or '/argo'; obj['ps']=obj.get('ps') or 'VMess-Argo'
-    return 'vmess://'+base64.b64encode(json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode('utf-8')).decode('ascii')
+    obj['add']=preferred
+    obj['port']='443'
+    obj['net']='ws'
+    obj['type']='none'
+    obj['tls']='tls'
+    obj['host']=argo_host
+    obj['sni']=argo_host
+    obj['path']=obj.get('path') or '/argo'
+    obj['ps']=obj.get('ps') or 'VMess-Argo'
+    enc=base64.b64encode(json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode('utf-8')).decode('ascii')
+    return 'vmess://'+enc
 
 try:
     if link.lower().startswith('vmess://'):
         body=link.split('://',1)[1]
         print(vmess_from_uri(link) if '@' in body else vmess_from_base64(link))
     elif link.lower().startswith('vless://'):
-        u=urlsplit(link); q=dict(parse_qsl(u.query,keep_blank_values=True)); q['type']='ws'; q['security']='tls'; q['encryption']='none'; q['host']=argo_host; q['sni']=argo_host; q['path']=q.get('path') or unquote(u.path) or '/argo'
+        u=urlsplit(link)
+        q=dict(parse_qsl(u.query,keep_blank_values=True))
+        q['type']='ws'
+        q['security']='tls'
+        q['encryption']='none'
+        q['host']=argo_host
+        q['sni']=argo_host
+        q['path']=q.get('path') or unquote(u.path) or '/argo'
         print('vless://'+(u.username or '')+'@'+preferred+':443?'+urlencode(q)+'#'+(u.fragment or 'VLESS-Argo'))
     else:
         print(link)
 except Exception as e:
-    print('NODE_BUILD_ERROR:'+str(e),file=sys.stderr); print(link)
+    print('NODE_BUILD_ERROR:'+str(e),file=sys.stderr)
+    print(link)
 PY2
         }
 
@@ -149,7 +198,8 @@ PY2
         echo
         pause;;
 '''
-p.write_text(s[:start]+new+s[end:])
+
+p.write_text(s[:start] + new + s[end:], encoding="utf-8")
 PY
 
 exec bash "$TMP"
