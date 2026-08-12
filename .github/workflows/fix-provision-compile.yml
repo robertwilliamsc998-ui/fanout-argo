@@ -1,0 +1,38 @@
+name: fix-provision-compile
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Remove obsolete TemplateID field from provision API request
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('main.go')
+          s = p.read_text()
+          old = 'TemplateID: req.TemplateID,'
+          if old in s:
+              s = s.replace(old, '')
+              p.write_text(s)
+          PY
+          gofmt -w main.go
+          go test ./...
+          if grep -RniE 'CloneToTunnels|apiXUIClone|/api/xui/clone' --include='*.go' .; then exit 1; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .github/workflows/fix-provision-compile.yml
+          git add -A
+          git commit -m 'remove obsolete provision template field'
+          git push origin main
