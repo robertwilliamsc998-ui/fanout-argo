@@ -79,8 +79,6 @@ new = r'''        host=""; token=""; node_port=""
             continue
           fi
 
-          # 同步持久化的 Argo local_port。然后重启 fanout，让内存状态、
-          # 节点列表和分享链接全部使用新的端口。
           if [[ -f "$WORK_DIR/argo.json" && -n "$argo_id" ]]; then
             python3 - "$WORK_DIR/argo.json" "$argo_id" "$node_port" <<'PY2' 2>/dev/null || true
 import json,sys
@@ -103,12 +101,16 @@ PY2
 
         echo
         echo -e "  ${G}Argo 节点创建完成${N}"
-        echo -e "  出口      : ${exit}"
-        echo -e "  协议      : ${protocol}"
-        echo -e "  模式      : ${mode}"
-        [[ -n "$host" ]] && echo -e "  Argo 域名 : ${host}"
-        [[ -n "$node_port" ]] && echo -e "  节点端口  : ${node_port}"
-        echo -e "  状态      : ${status:--}"
+        echo -e "  出口          : ${exit}"
+        echo -e "  协议          : ${protocol}"
+        echo -e "  模式          : ${mode}"
+        [[ -n "$host" ]] && echo -e "  Argo 域名     : ${host}"
+        echo -e "  TLS 传输安全  : TLS"
+        echo -e "  外部端口      : 443"
+        echo -e "  优选地址      : www.wto.org"
+        echo -e "  Host/SNI      : ${host}"
+        [[ -n "$node_port" ]] && echo -e "  本地入站端口  : ${node_port}"
+        echo -e "  状态          : ${status:--}"
         echo
         echo -e "  ${B}节点连接（直接复制到客户端）：${N}"
 
@@ -118,16 +120,64 @@ PY2
           detail=$(curl -s --max-time 20 -b "$ck" \
             "http://127.0.0.1:${port}/${bp}/api/xui/detail?id=${inbound_id}" 2>/dev/null || true)
           rm -f "$ck"
-          links=$(printf '%s' "$detail" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\\n".join(d.get("links",[])))' 2>/dev/null || true)
+          links=$(printf '%s' "$detail" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d.get("links",[])))' 2>/dev/null || true)
         fi
+
+        # Cloudflare Argo 对外统一使用 TLS + WS + 443。
+        # www.wto.org 作为统一优选地址；Host/SNI 仍保持用户的 Argo 域名，
+        # 这样不会把 Argo Tunnel 域名替换掉。
+        normalize_link() {
+          python3 - "$1" "$host" <<'PY3'
+import base64, json, sys
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+link = sys.argv[1]
+argo_host = sys.argv[2]
+preferred = "www.wto.org"
+
+try:
+    if link.startswith("vless://"):
+        u = urlsplit(link)
+        q = dict(parse_qsl(u.query, keep_blank_values=True))
+        q["type"] = "ws"
+        q["security"] = "tls"
+        q["host"] = argo_host
+        q["sni"] = argo_host
+        if "encryption" not in q:
+            q["encryption"] = "none"
+        netloc = u.username + "@" + preferred + ":443"
+        print(urlunsplit((u.scheme, netloc, u.path, urlencode(q), u.fragment)))
+    elif link.startswith("vmess://"):
+        raw = link[len("vmess://"):]
+        pad = "=" * (-len(raw) % 4)
+        obj = json.loads(base64.urlsafe_b64decode(raw + pad).decode())
+        obj["add"] = preferred
+        obj["port"] = "443"
+        obj["net"] = "ws"
+        obj["type"] = "none"
+        obj["tls"] = "tls"
+        obj["host"] = argo_host
+        obj["sni"] = argo_host
+        if "alpn" not in obj:
+            obj["alpn"] = "h2,http/1.1"
+        enc = base64.urlsafe_b64encode(json.dumps(obj,separators=(",",":"),ensure_ascii=False).encode()).decode().rstrip("=")
+        print("vmess://" + enc)
+    else:
+        print(link)
+except Exception:
+    # 后端已经生成 TLS/443 时，至少保证原链接仍可用。
+    print(link)
+PY3
+        }
 
         if [[ -n "$links" ]]; then
           while IFS= read -r link; do
-            [[ -n "$link" ]] && echo "$link"
+            [[ -z "$link" ]] && continue
+            normalize_link "$link"
           done <<< "$links"
         else
           link=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("link", ""))' 2>/dev/null || true)
-          [[ -n "$link" ]] && echo "$link"
+          [[ -n "$link" ]] && normalize_link "$link"
         fi
         echo
         pause;;
