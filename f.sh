@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
-# Compatibility wrapper: load the last stable interactive manager and apply
-# the Argo fixed-Tunnel port/token/output fixes at runtime.
+# fanout 管理菜单兼容层：修复 Argo 节点输出，尤其是 VMess。
 set -euo pipefail
 
 BASE_URL="https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/25ea599b477ce852ceddd4d888af2982824fb00e/f.sh"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
-
 curl -fsSL --max-time 30 "$BASE_URL" -o "$TMP"
 
 python3 - "$TMP" <<'PY'
 from pathlib import Path
 import sys
-
-p = Path(sys.argv[1])
-s = p.read_text()
-
-start = s.index('        host=""; token=""')
-end = s.index('      3|4)', start)
-
-new = r'''        host=""; token=""; node_port=""
+p=Path(sys.argv[1])
+s=p.read_text()
+start=s.index('        host=""; token=""')
+end=s.index('      3|4)', start)
+new=r'''        host=""; token=""; node_port=""
         if [[ "$mode" == fixed ]]; then
           read -rp "  Argo 域名: " host
           echo
@@ -58,15 +53,11 @@ new = r'''        host=""; token=""; node_port=""
         fi
 
         argo_id=""; inbound_id=""; actual_port=""; status=""
-        if command -v python3 >/dev/null 2>&1; then
-          argo_id=$(printf '%s' "$resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id", ""))' 2>/dev/null || true)
-          inbound_id=$(printf '%s' "$resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("inbound_id", ""))' 2>/dev/null || true)
-          actual_port=$(printf '%s' "$resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("local_port", ""))' 2>/dev/null || true)
-          status=$(printf '%s' "$resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status", ""))' 2>/dev/null || true)
-        fi
+        argo_id=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' 2>/dev/null || true)
+        inbound_id=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("inbound_id", ""))' 2>/dev/null || true)
+        actual_port=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("local_port", ""))' 2>/dev/null || true)
+        status=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))' 2>/dev/null || true)
 
-        # 当前后端新建入站默认随机端口。固定 Tunnel 的服务端口必须与
-        # Cloudflare Tunnel 配置一致，所以创建后立即切换到用户指定端口。
         if [[ "$mode" == fixed && -n "$node_port" && -n "$inbound_id" && "$actual_port" != "$node_port" ]]; then
           uck=$(argo_api_login)
           upd=$(curl -s --max-time 20 -b "$uck" \
@@ -77,22 +68,6 @@ new = r'''        host=""; token=""; node_port=""
             echo "  更新结果: ${upd}"
             pause
             continue
-          fi
-
-          if [[ -f "$WORK_DIR/argo.json" && -n "$argo_id" ]]; then
-            python3 - "$WORK_DIR/argo.json" "$argo_id" "$node_port" <<'PY2' 2>/dev/null || true
-import json,sys
-p, aid, port = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-try:
-    d=json.load(open(p))
-    for x in d.get("argo", []):
-        if int(x.get("id",0)) == aid:
-            x["local_port"] = port
-    with open(p,"w") as f:
-        json.dump(d,f,ensure_ascii=False,indent=2)
-except Exception:
-    pass
-PY2
           fi
           svc_restart >/dev/null 2>&1 || true
           sleep 2
@@ -106,7 +81,7 @@ PY2
         echo -e "  模式          : ${mode}"
         [[ -n "$host" ]] && echo -e "  Argo 域名     : ${host}"
         echo -e "  TLS 传输安全  : TLS"
-        echo -e "  外部端口      : 443"
+        echo -e "  外部地址      : www.wto.org:443"
         echo -e "  优选地址      : www.wto.org"
         echo -e "  Host/SNI      : ${host}"
         [[ -n "$node_port" ]] && echo -e "  本地入站端口  : ${node_port}"
@@ -120,54 +95,50 @@ PY2
           detail=$(curl -s --max-time 20 -b "$ck" \
             "http://127.0.0.1:${port}/${bp}/api/xui/detail?id=${inbound_id}" 2>/dev/null || true)
           rm -f "$ck"
-          links=$(printf '%s' "$detail" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d.get("links",[])))' 2>/dev/null || true)
+          links=$(printf '%s' "$detail" | python3 -c 'import json,sys; d=json.load(sys.stdin); x=d.get("links",[]); print("\n".join(x if isinstance(x,list) else [x]))' 2>/dev/null || true)
+        fi
+        if [[ -z "$links" ]]; then
+          link=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("link", ""))' 2>/dev/null || true)
+          [[ -n "$link" ]] && links="$link"
         fi
 
-        # Cloudflare Argo 对外统一使用 TLS + WS + 443。
-        # www.wto.org 作为统一优选地址；Host/SNI 仍保持用户的 Argo 域名，
-        # 这样不会把 Argo Tunnel 域名替换掉。
         normalize_link() {
-          python3 - "$1" "$host" <<'PY3'
-import base64, json, sys
-from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
-
-link = sys.argv[1]
-argo_host = sys.argv[2]
-preferred = "www.wto.org"
-
+          python3 - "$1" "$host" <<'PY2'
+import base64,json,sys
+from urllib.parse import urlsplit,urlunsplit,parse_qsl,urlencode,unquote
+link=sys.argv[1].strip(); argo_host=sys.argv[2].strip(); preferred='www.wto.org'
 try:
-    if link.startswith("vless://"):
-        u = urlsplit(link)
-        q = dict(parse_qsl(u.query, keep_blank_values=True))
-        q["type"] = "ws"
-        q["security"] = "tls"
-        q["host"] = argo_host
-        q["sni"] = argo_host
-        if "encryption" not in q:
-            q["encryption"] = "none"
-        netloc = u.username + "@" + preferred + ":443"
-        print(urlunsplit((u.scheme, netloc, u.path, urlencode(q), u.fragment)))
-    elif link.startswith("vmess://"):
-        raw = link[len("vmess://"):]
-        pad = "=" * (-len(raw) % 4)
-        obj = json.loads(base64.urlsafe_b64decode(raw + pad).decode())
-        obj["add"] = preferred
-        obj["port"] = "443"
-        obj["net"] = "ws"
-        obj["type"] = "none"
-        obj["tls"] = "tls"
-        obj["host"] = argo_host
-        obj["sni"] = argo_host
-        if "alpn" not in obj:
-            obj["alpn"] = "h2,http/1.1"
-        enc = base64.urlsafe_b64encode(json.dumps(obj,separators=(",",":"),ensure_ascii=False).encode()).decode().rstrip("=")
-        print("vmess://" + enc)
+    if link.lower().startswith('vmess://'):
+        raw=link.split('://',1)[1].strip()
+        raw=unquote(raw)
+        raw += '='*((-len(raw))%4)
+        obj=json.loads(base64.urlsafe_b64decode(raw.encode()).decode('utf-8-sig'))
+        # Cloudflare Argo 对外固定：优选地址 + 443 + TLS + WS。
+        obj['add']=preferred
+        obj['port']='443'
+        obj['net']='ws'
+        obj['type']='none'
+        obj['tls']='tls'
+        obj['host']=argo_host
+        obj['sni']=argo_host
+        if not obj.get('path'):
+            obj['path']='/argo'
+        obj['ps']=obj.get('ps') or 'VMess-Argo'
+        enc=base64.urlsafe_b64encode(json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode()).decode().rstrip('=')
+        print('vmess://'+enc)
+    elif link.lower().startswith('vless://'):
+        u=urlsplit(link); q=dict(parse_qsl(u.query,keep_blank_values=True))
+        q['type']='ws'; q['security']='tls'; q['encryption']='none'; q['host']=argo_host; q['sni']=argo_host
+        path=q.get('path') or u.path or '/argo'; q['path']=path
+        user=u.username or ''
+        netloc=user+'@'+preferred+':443'
+        print(urlunsplit(('vless',netloc,'',urlencode(q),u.fragment or 'VLESS-Argo')))
     else:
         print(link)
-except Exception:
-    # 后端已经生成 TLS/443 时，至少保证原链接仍可用。
+except Exception as e:
+    print('NODE_BUILD_ERROR:'+str(e),file=sys.stderr)
     print(link)
-PY3
+PY2
         }
 
         if [[ -n "$links" ]]; then
@@ -176,14 +147,12 @@ PY3
             normalize_link "$link"
           done <<< "$links"
         else
-          link=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("link", ""))' 2>/dev/null || true)
-          [[ -n "$link" ]] && normalize_link "$link"
+          echo -e "  ${R}未能从后端取得节点连接，请检查 Argo 节点状态。${N}"
         fi
         echo
         pause;;
 '''
-
-p.write_text(s[:start] + new + s[end:])
+p.write_text(s[:start]+new+s[end:])
 PY
 
 exec bash "$TMP"
