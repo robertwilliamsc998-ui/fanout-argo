@@ -103,36 +103,70 @@ new=r'''        host=""; token=""; node_port=""
         fi
 
         normalize_link() {
-          python3 - "$1" "$host" <<'PY2'
+          python3 - "$1" "$host" "$protocol" <<'PY2'
 import base64,json,sys
-from urllib.parse import urlsplit,urlunsplit,parse_qsl,urlencode,unquote
-link=sys.argv[1].strip(); argo_host=sys.argv[2].strip(); preferred='www.wto.org'
+from urllib.parse import urlsplit,parse_qsl,unquote
+link=sys.argv[1].strip(); argo_host=sys.argv[2].strip(); protocol=sys.argv[3].strip().lower(); preferred='www.wto.org'
+
+def vmess_from_uri(link):
+    """兼容后端返回的 vmess://UUID@host:port?... 形式。"""
+    u=urlsplit(link)
+    if not u.username:
+        raise ValueError('VMess URI 缺少 UUID')
+    uuid=unquote(u.username)
+    q=dict(parse_qsl(u.query,keep_blank_values=True))
+    path=q.get('path') or unquote(u.path) or '/argo'
+    obj={
+        'v':'2',
+        'ps':q.get('remark') or q.get('name') or 'VMess-Argo',
+        'add':preferred,
+        'port':'443',
+        'id':uuid,
+        'aid':q.get('aid','0'),
+        'scy':q.get('scy','auto'),
+        'net':'ws',
+        'type':'none',
+        'host':argo_host,
+        'path':path,
+        'tls':'tls',
+        'sni':argo_host,
+    }
+    raw=json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode('utf-8')
+    return 'vmess://'+base64.b64encode(raw).decode('ascii')
+
+def vmess_from_base64(link):
+    raw=link.split('://',1)[1].strip()
+    raw=unquote(raw)
+    raw += '='*((-len(raw))%4)
+    # 兼容标准/URL-safe Base64；严格 UTF-8 解码，失败时交给 URI 解析而不是输出 NODE_BUILD_ERROR。
+    decoded=base64.b64decode(raw.encode('ascii'),altchars=b'-_',validate=False)
+    obj=json.loads(decoded.decode('utf-8-sig'))
+    obj['add']=preferred
+    obj['port']='443'
+    obj['net']='ws'
+    obj['type']='none'
+    obj['tls']='tls'
+    obj['host']=argo_host
+    obj['sni']=argo_host
+    obj['path']=obj.get('path') or '/argo'
+    obj['ps']=obj.get('ps') or 'VMess-Argo'
+    enc=base64.b64encode(json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode('utf-8')).decode('ascii')
+    return 'vmess://'+enc
+
 try:
     if link.lower().startswith('vmess://'):
-        raw=link.split('://',1)[1].strip()
-        raw=unquote(raw)
-        raw += '='*((-len(raw))%4)
-        obj=json.loads(base64.urlsafe_b64decode(raw.encode()).decode('utf-8-sig'))
-        # Cloudflare Argo 对外固定：优选地址 + 443 + TLS + WS。
-        obj['add']=preferred
-        obj['port']='443'
-        obj['net']='ws'
-        obj['type']='none'
-        obj['tls']='tls'
-        obj['host']=argo_host
-        obj['sni']=argo_host
-        if not obj.get('path'):
-            obj['path']='/argo'
-        obj['ps']=obj.get('ps') or 'VMess-Argo'
-        enc=base64.urlsafe_b64encode(json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode()).decode().rstrip('=')
-        print('vmess://'+enc)
+        # 新版后端返回的是 UUID@host:port?query 的 URI；旧版可能返回 Base64 JSON。
+        body=link.split('://',1)[1]
+        if '@' in body:
+            print(vmess_from_uri(link))
+        else:
+            print(vmess_from_base64(link))
     elif link.lower().startswith('vless://'):
         u=urlsplit(link); q=dict(parse_qsl(u.query,keep_blank_values=True))
         q['type']='ws'; q['security']='tls'; q['encryption']='none'; q['host']=argo_host; q['sni']=argo_host
-        path=q.get('path') or u.path or '/argo'; q['path']=path
+        path=q.get('path') or unquote(u.path) or '/argo'; q['path']=path
         user=u.username or ''
-        netloc=user+'@'+preferred+':443'
-        print(urlunsplit(('vless',netloc,'',urlencode(q),u.fragment or 'VLESS-Argo')))
+        print('vless://'+user+'@'+preferred+':443?'+__import__('urllib.parse').parse.urlencode(q)+'#'+(u.fragment or 'VLESS-Argo'))
     else:
         print(link)
 except Exception as e:
