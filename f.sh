@@ -18,10 +18,8 @@ new=r'''        host=""; token=""; node_port=""
         if [[ "$mode" == fixed ]]; then
           read -rp "  Argo 域名: " host
           echo
-          read -rsp "  Tunnel Token: " token
-          echo
-          echo -e "  ${D}已输入 Token（完整显示用于核对）：${N}"
-          echo "  ${token}"
+          # Token 明文输入，方便边输入边校对；不再使用 read -s 隐藏字符，也不再二次显示。
+          read -rp "  Tunnel Token: " token
           echo
           while true; do
             read -rp "  节点本地端口: " node_port
