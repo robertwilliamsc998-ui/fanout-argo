@@ -106,7 +106,6 @@ func main() {
 	mux.HandleFunc("/api/xui", apiXUIStatus)
 	mux.HandleFunc("/api/xui/inbounds", apiXUIInbounds(mgr))
 	mux.HandleFunc("/api/xui/bind", apiXUIBind(mgr))
-	mux.HandleFunc("/api/xui/clone", apiXUIClone(mgr))
 	mux.HandleFunc("/api/xui/detail", apiXUIDetail)
 	mux.HandleFunc("/api/xui/links", apiXUILinks)
 	mux.HandleFunc("/api/xui/delete", apiXUIDelete(mgr))
@@ -451,16 +450,7 @@ func apiProvision(m *Manager) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count 参数无效"})
 			return
 		}
-		tpl := 0
-		if s := q.Get("template"); s != "" {
-			if tpl, err = strconv.Atoi(s); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "template 参数无效"})
-				return
-			}
-		}
-		job, err := m.Provision(ProvisionRequest{
-			Region: q.Get("region"), Count: count, TemplateID: tpl,
-		})
+		job, err := m.Provision(ProvisionRequest{Region: q.Get("region"), Count: count})
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -555,49 +545,6 @@ func apiXUIBind(m *Manager) http.HandlerFunc {
 }
 
 // apiXUIClone 以某个入站为模板，为所有已连通的隧道各复制一个入站并绑好出口。
-func apiXUIClone(m *Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.Atoi(r.URL.Query().Get("id"))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id 参数无效"})
-			return
-		}
-
-		tunnels := m.Tunnels()
-		// 用节点主机名而非槽位号：槽位在重启后会重排，指代会错位
-		var hosts []string
-		if raw := r.URL.Query().Get("hosts"); raw != "" {
-			for _, part := range strings.Split(raw, ",") {
-				if h := strings.TrimSpace(part); h != "" {
-					hosts = append(hosts, h)
-				}
-			}
-		} else {
-			for _, t := range tunnels {
-				if t.Status == "up" {
-					hosts = append(hosts, t.Node.HostName)
-				}
-			}
-		}
-		if len(hosts) == 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "没有可用的隧道"})
-			return
-		}
-
-		x, err := openPanel()
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		ports, err := x.CloneToTunnels(id, hosts, tunnels)
-		invalidateInbounds()
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "created": ports})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"created": ports})
-	}
-}
 
 // apiXUIDetail 返回某个入站的详情，含客户端与可直接复制的分享链接。
 func apiXUIDetail(w http.ResponseWriter, r *http.Request) {

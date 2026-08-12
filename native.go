@@ -212,63 +212,6 @@ func (n *Native) ResyncOutbound(t *Tunnel, tunnels []*Tunnel) error {
 // CloneToTunnels 以某个入站为模板，为每条指定隧道复制一个入站并绑好出口。
 //
 // 客户端凭据整套沿用模板：同一个 UUID 能走所有出口，用户只改端口。
-func (n *Native) CloneToTunnels(templateID int, hosts []string, tunnels []*Tunnel) ([]int, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	tpl := n.store.byID(templateID)
-	if tpl == nil {
-		return nil, fmt.Errorf("模板入站 %d 不存在", templateID)
-	}
-
-	byHost := map[string]*Tunnel{}
-	for _, t := range tunnels {
-		byHost[t.Node.HostName] = t
-	}
-
-	used := n.store.usedPorts()
-	created := []int{}
-	for _, host := range hosts {
-		t := byHost[host]
-		if t == nil || t.Status != "up" {
-			continue
-		}
-		port, err := freeRandomPort(used)
-		if err != nil {
-			return created, err
-		}
-		used[port] = true
-
-		clone := &nativeInbound{
-			ID:       n.store.NextID,
-			Port:     port,
-			Protocol: tpl.Protocol,
-			Network:  tpl.Network,
-			Path:     tpl.Path,
-			Host:     tpl.Host,
-			// 安全层必须跟着复制：漏掉的话从 REALITY/TLS 模板复制出来的
-			// 入站会变成明文，而分享链接照样标着模板的协议，很难发现
-			Security: tpl.Security,
-			TLS:      tpl.TLS,
-			Reality:  tpl.Reality,
-			Remark:   cloneRemark(tpl.Remark, exitLabel(t)),
-			Enable:   true,
-			Clients:  append([]nativeClient(nil), tpl.Clients...),
-			BoundTo:  sanitizeTag(t.Node.HostName),
-		}
-		n.store.NextID++
-		n.store.Inbounds = append(n.store.Inbounds, clone)
-		created = append(created, port)
-	}
-
-	if len(created) == 0 {
-		return created, fmt.Errorf("没有可用的隧道")
-	}
-	if err := n.apply(tunnels); err != nil {
-		return created, err
-	}
-	return created, nil
-}
 
 func (n *Native) DeleteInbounds(ids []int, tunnels []*Tunnel) error {
 	n.mu.Lock()
