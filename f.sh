@@ -13,7 +13,6 @@ need_root() {
   [[ $EUID -eq 0 ]] || { echo -e "${R}需要 root${N}"; exit 1; }
 }
 
-# ── init 系统抽象：systemd 与 OpenRC ────────────────────
 if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
   INIT_SYS=systemd
   UNIT=/etc/systemd/system/${SERVICE}.service
@@ -30,83 +29,29 @@ svc_enable()  { [[ $INIT_SYS == systemd ]] && systemctl enable "$SERVICE" >/dev/
 svc_disable() { [[ $INIT_SYS == systemd ]] && systemctl disable "$SERVICE" >/dev/null 2>&1 || rc-update del "$SERVICE" default >/dev/null 2>&1; }
 
 svc_is_enabled() {
-  if [[ $INIT_SYS == systemd ]]; then
-    systemctl is-enabled --quiet "$SERVICE"
-  else
-    rc-update show default 2>/dev/null | grep -q "^ *${SERVICE} "
-  fi
+  if [[ $INIT_SYS == systemd ]]; then systemctl is-enabled --quiet "$SERVICE"; else rc-update show default 2>/dev/null | grep -q "^ *${SERVICE} "; fi
 }
+svc_enabled_text() { svc_is_enabled && echo enabled || echo disabled; }
+svc_status_page() { if [[ $INIT_SYS == systemd ]]; then systemctl status "$SERVICE" --no-pager; else rc-service "$SERVICE" status; fi; }
+svc_logs() { if [[ $INIT_SYS == systemd ]]; then journalctl -u "$SERVICE" -n "${1:-50}" --no-pager; else tail -n "${1:-50}" /var/log/${SERVICE}.log 2>/dev/null || echo "  暂无日志"; fi; }
+svc_logs_follow() { if [[ $INIT_SYS == systemd ]]; then journalctl -u "$SERVICE" -f; else tail -f /var/log/${SERVICE}.log; fi; }
+svc_state() { if [[ $INIT_SYS == systemd ]]; then systemctl is-active --quiet "$SERVICE" && echo running || echo stopped; else rc-service "$SERVICE" status >/dev/null 2>&1 && echo running || echo stopped; fi; }
 
-svc_enabled_text() {
-  svc_is_enabled && echo enabled || echo disabled
-}
-
-svc_status_page() {
-  if [[ $INIT_SYS == systemd ]]; then
-    systemctl status "$SERVICE" --no-pager
-  else
-    rc-service "$SERVICE" status
-  fi
-}
-
-svc_logs() {
-  if [[ $INIT_SYS == systemd ]]; then
-    journalctl -u "$SERVICE" -n "${1:-50}" --no-pager
-  else
-    tail -n "${1:-50}" /var/log/${SERVICE}.log 2>/dev/null || echo "  暂无日志"
-  fi
-}
-
-svc_logs_follow() {
-  if [[ $INIT_SYS == systemd ]]; then
-    journalctl -u "$SERVICE" -f
-  else
-    tail -f /var/log/${SERVICE}.log
-  fi
-}
-
-svc_state() {
-  if [[ $INIT_SYS == systemd ]]; then
-    systemctl is-active --quiet "$SERVICE" && echo running || echo stopped
-  else
-    rc-service "$SERVICE" status >/dev/null 2>&1 && echo running || echo stopped
-  fi
-}
-
-web_port() {
-  grep -oE '\-web [0-9]+' "$UNIT" 2>/dev/null \
-    | grep -oE '[0-9]+' | head -1 || echo 8899
-}
-
-public_ip() {
-  curl -s --max-time 6 http://api.ipify.org 2>/dev/null || echo "<本机IP>"
-}
-
-pause() {
-  echo
-  read -rp "回车返回菜单..." _
-}
+web_port() { grep -oE '\-web [0-9]+' "$UNIT" 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo 8899; }
+public_ip() { curl -s --max-time 6 http://api.ipify.org 2>/dev/null || echo "<本机IP>"; }
+pause() { echo; read -rp "回车返回菜单..." _; }
 
 show_info() {
   local state port bp pw ip
-  state=$(svc_state); port=$(web_port)
-  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null || echo "-")
-  pw=$(cat "$WORK_DIR/password" 2>/dev/null || echo "-")
-  ip=$(public_ip)
-
+  state=$(svc_state); port=$(web_port); bp=$(cat "$WORK_DIR/basepath" 2>/dev/null || echo "-"); pw=$(cat "$WORK_DIR/password" 2>/dev/null || echo "-"); ip=$(public_ip)
   echo
-  if [[ $state == running ]]; then
-    echo -e "  状态      ${G}运行中${N}"
-  else
-    echo -e "  状态      ${R}已停止${N}"
-  fi
+  if [[ $state == running ]]; then echo -e "  状态      ${G}运行中${N}"; else echo -e "  状态      ${R}已停止${N}"; fi
   echo -e "  版本      $("$BIN" -version 2>/dev/null || echo '-')"
   echo -e "  开机自启  $(svc_enabled_text)"
   echo
   echo -e "  ${B}管理地址  http://${ip}:${port}/${bp}/${N}"
   echo -e "  ${B}访问口令  ${pw}${N}"
   echo
-
   local n
   n=$(ls -d /var/run/netns/fo* 2>/dev/null | wc -l | tr -d ' ')
   echo -e "  ${D}运行中的隧道: ${n}${N}"
@@ -114,25 +59,15 @@ show_info() {
 
 list_tunnels() {
   local port bp pw ck
-  port=$(web_port)
-  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  pw=$(cat "$WORK_DIR/password" 2>/dev/null)
-  ck=$(mktemp)
-
-  curl -s --max-time 10 -c "$ck" -X POST -d "password=${pw}" \
-    "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
+  port=$(web_port); bp=$(cat "$WORK_DIR/basepath" 2>/dev/null); pw=$(cat "$WORK_DIR/password" 2>/dev/null); ck=$(mktemp)
+  curl -s --max-time 10 -c "$ck" -X POST -d "password=${pw}" "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
   echo
-  curl -s --max-time 10 -b "$ck" "http://127.0.0.1:${port}/${bp}/api/tunnels" \
-    > "$ck.json" 2>/dev/null
+  curl -s --max-time 10 -b "$ck" "http://127.0.0.1:${port}/${bp}/api/tunnels" > "$ck.json" 2>/dev/null
   rm -f "$ck"
-
-  # 用 sed/awk 解析而不是 python3/jq：Alpine 最小安装两者都没有，
-  # 为了一条列表命令再拉依赖不值当。字段固定，按对象拆行足够稳。
   if [[ ! -s "$ck.json" ]] || ! grep -q '"port"' "$ck.json" 2>/dev/null; then
     echo "  还没有隧道，去网页里添加"
   else
     printf "  %-10s%-11s%-18s%s\n" "端口" "状态" "出口 IP" "节点"
-    # 按 {"slot" 切分而不是按 }：node 是嵌套对象，按 } 切会把一条记录劈成两半
     sed 's/{"slot"/\n{"slot"/g' "$ck.json" | while IFS= read -r line; do
       case "$line" in *'"slot"'*) ;; *) continue ;; esac
       p=$(echo "$line"  | sed -n 's/.*"port":\([0-9]*\).*/\1/p')
@@ -148,57 +83,32 @@ list_tunnels() {
 
 change_port() {
   local cur new
-  cur=$(web_port)
-  echo
-  read -rp "  新端口 (当前 ${cur}): " new
+  cur=$(web_port); echo; read -rp "  新端口 (当前 ${cur}): " new
   [[ -z $new ]] && { echo "  未修改"; return; }
-  if ! [[ $new =~ ^[0-9]+$ ]] || (( new < 1 || new > 65535 )); then
-    echo -e "  ${R}端口不合法${N}"; return
-  fi
-  if ss -tln 2>/dev/null | grep -q ":${new} "; then
-    echo -e "  ${R}端口 ${new} 已被占用${N}"; return
-  fi
-  sed -i "s/-web ${cur}/-web ${new}/" "$UNIT"
-  svc_reload
-  svc_restart
+  if ! [[ $new =~ ^[0-9]+$ ]] || (( new < 1 || new > 65535 )); then echo -e "  ${R}端口不合法${N}"; return; fi
+  if ss -tln 2>/dev/null | grep -q ":${new} "; then echo -e "  ${R}端口 ${new} 已被占用${N}"; return; fi
+  sed -i "s/-web ${cur}/-web ${new}/" "$UNIT"; svc_reload; svc_restart
   echo -e "  ${G}已改为 ${new} 并重启${N}"
 }
 
 reset_password() {
   local pw
-  echo
-  read -rp "  新口令 (留空则随机生成): " pw
-  if [[ -z $pw ]]; then
-    pw=$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  fi
-  umask 077
-  echo "$pw" > "$WORK_DIR/password"
-  svc_restart
+  echo; read -rp "  新口令 (留空则随机生成): " pw
+  if [[ -z $pw ]]; then pw=$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n'); fi
+  umask 077; echo "$pw" > "$WORK_DIR/password"; svc_restart
   echo -e "  ${G}新口令: ${pw}${N}"
 }
 
 reset_basepath() {
   local bp
-  echo
-  read -rp "  新访问路径 (留空则随机生成): " bp
-  if [[ -z $bp ]]; then
-    rm -f "$WORK_DIR/basepath"
-    svc_restart
-    sleep 2
-    bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  else
-    bp=${bp#/}; bp=${bp%/}
-    umask 077
-    echo "$bp" > "$WORK_DIR/basepath"
-    svc_restart
-  fi
+  echo; read -rp "  新访问路径 (留空则随机生成): " bp
+  if [[ -z $bp ]]; then rm -f "$WORK_DIR/basepath"; svc_restart; sleep 2; bp=$(cat "$WORK_DIR/basepath" 2>/dev/null); else bp=${bp#/}; bp=${bp%/}; umask 077; echo "$bp" > "$WORK_DIR/basepath"; svc_restart; fi
   echo -e "  ${G}新路径: /${bp}/${N}"
 }
 
 ipv6_state() {
   local a d
-  a=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)
-  d=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null || echo 0)
+  a=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0); d=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null || echo 0)
   [[ "$a" == 1 && "$d" == 1 ]] && echo disabled || echo enabled
 }
 
@@ -206,29 +116,18 @@ toggle_ipv6() {
   local conf=/etc/sysctl.d/99-fanout-ipv6.conf
   echo
   if [[ $(ipv6_state) == disabled ]]; then
-    read -rp "  当前已禁用 IPv6，要重新启用吗？[y/N]: " yes
-    [[ ${yes,,} == y ]] || { echo "  已取消"; return; }
-    rm -f "$conf"
-    sysctl -qw net.ipv6.conf.all.disable_ipv6=0
-    sysctl -qw net.ipv6.conf.default.disable_ipv6=0
-    sysctl -qw net.ipv6.conf.lo.disable_ipv6=0
-    echo -e "  ${G}已重新启用 IPv6${N}"
-    return
+    read -rp "  当前已禁用 IPv6，要重新启用吗？[y/N]: " yes; [[ ${yes,,} == y ]] || { echo "  已取消"; return; }
+    rm -f "$conf"; sysctl -qw net.ipv6.conf.all.disable_ipv6=0; sysctl -qw net.ipv6.conf.default.disable_ipv6=0; sysctl -qw net.ipv6.conf.lo.disable_ipv6=0
+    echo -e "  ${G}已重新启用 IPv6${N}"; return
   fi
-
   echo -e "  ${D}母机有全局 IPv6 时，没走隧道的流量可能从 IPv6 出去，暴露真实地址。${N}"
-  read -rp "  确认禁用整机 IPv6？[y/N]: " yes
-  [[ ${yes,,} == y ]] || { echo "  已取消"; return; }
-
+  read -rp "  确认禁用整机 IPv6？[y/N]: " yes; [[ ${yes,,} == y ]] || { echo "  已取消"; return; }
   cat > "$conf" <<EOF
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 EOF
-  sysctl -qw net.ipv6.conf.all.disable_ipv6=1
-  sysctl -qw net.ipv6.conf.default.disable_ipv6=1
-  sysctl -qw net.ipv6.conf.lo.disable_ipv6=1
-  svc_restart >/dev/null 2>&1
+  sysctl -qw net.ipv6.conf.all.disable_ipv6=1; sysctl -qw net.ipv6.conf.default.disable_ipv6=1; sysctl -qw net.ipv6.conf.lo.disable_ipv6=1; svc_restart >/dev/null 2>&1
   echo -e "  ${G}已禁用 IPv6（重启后依然生效）${N}"
 }
 
@@ -238,54 +137,26 @@ show_links() {
   echo -e "  油管    ${B}https://youtube.com/@joeyblog${N}"
   echo -e "  博客    ${B}https://joeyblog.net${N}"
   echo -e "  项目    ${B}https://github.com/robertwilliamsc998-ui/fanout-argo${N}"
-  echo
-  echo -e "  ${D}用着有问题、或者想要什么功能，去群里说或提 issue。${N}"
+  echo; echo -e "  ${D}用着有问题、或者想要什么功能，去群里说或提 issue。${N}"
 }
 
 do_update() {
   local arch goarch tmp
-  arch=$(uname -m)
-  case "$arch" in
-    x86_64) goarch=amd64 ;;
-    aarch64|arm64) goarch=arm64 ;;
-    *) echo -e "  ${R}不支持的架构 ${arch}${N}"; return ;;
-  esac
-
-  echo -e "\n  当前 $("$BIN" -version 2>/dev/null || echo '-')"
-  tmp=$(mktemp -d)
-  echo "  正在下载最新版..."
-  if ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/fanout-linux-${goarch}.tar.gz" \
-       -o "$tmp/f.tar.gz"; then
-    echo -e "  ${R}下载失败${N}"; rm -rf "$tmp"; return
-  fi
-  tar xzf "$tmp/f.tar.gz" -C "$tmp"
-  svc_stop
-  install -m 755 "$tmp/fanout" "$BIN"
-  svc_start
-  rm -rf "$tmp"
+  arch=$(uname -m); case "$arch" in x86_64) goarch=amd64 ;; aarch64|arm64) goarch=arm64 ;; *) echo -e "  ${R}不支持的架构 ${arch}${N}"; return ;; esac
+  echo -e "\n  当前 $("$BIN" -version 2>/dev/null || echo '-')"; tmp=$(mktemp -d); echo "  正在下载最新版..."
+  if ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/fanout-linux-${goarch}.tar.gz" -o "$tmp/f.tar.gz"; then echo -e "  ${R}下载失败${N}"; rm -rf "$tmp"; return; fi
+  tar xzf "$tmp/f.tar.gz" -C "$tmp"; svc_stop; install -m 755 "$tmp/fanout" "$BIN"; svc_start; rm -rf "$tmp"
   echo -e "  ${G}已更新到 $("$BIN" -version 2>/dev/null)${N}"
 }
 
 do_uninstall() {
   local yes
-  echo
-  read -rp "  确认卸载？隧道和配置都会删除 [y/N]: " yes
-  [[ ${yes,,} == y ]] || { echo "  已取消"; return; }
-
-  svc_stop >/dev/null 2>&1
-  svc_disable
-  # 清掉残留的 netns 与 veth
-  for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep '^fo[0-9]'); do
-    ip netns del "$ns" 2>/dev/null
-  done
-  for l in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep '^fov[0-9]'); do
-    ip link del "$l" 2>/dev/null
-  done
-  rm -f "$UNIT" "$BIN" /usr/local/bin/f
-  rm -rf "$WORK_DIR"
-  svc_reload
-  echo -e "  ${G}已卸载${N}"
-  exit 0
+  echo; read -rp "  确认卸载？隧道和配置都会删除 [y/N]: " yes; [[ ${yes,,} == y ]] || { echo "  已取消"; return; }
+  svc_stop >/dev/null 2>&1; svc_disable
+  for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep '^fo[0-9]'); do ip netns del "$ns" 2>/dev/null; done
+  for l in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep '^fov[0-9]'); do ip link del "$l" 2>/dev/null; done
+  rm -f "$UNIT" "$BIN" /usr/local/bin/f; rm -rf "$WORK_DIR"; svc_reload
+  echo -e "  ${G}已卸载${N}"; exit 0
 }
 
 argo_api_login() {
@@ -294,15 +165,70 @@ argo_api_login() {
   curl -s --max-time 8 -c "$ck" -X POST -d "password=${pw}" "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
   echo "$ck"
 }
+
+# 动态读取 fanout 当前所有出口。返回：slot|host|country|region|exit_ip|status
+argo_list_exits() {
+  local ck port bp json
+  ck=$(argo_api_login); port=$(web_port); bp=$(cat "$WORK_DIR/basepath" 2>/dev/null || true)
+  json=$(curl -s --max-time 8 -b "$ck" "http://127.0.0.1:${port}/${bp}/api/exits" 2>/dev/null || echo '{}')
+  rm -f "$ck"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -c '
+import json,sys
+try:
+ d=json.load(sys.stdin)
+ for x in d.get("exits",[]):
+  print("{}|{}|{}|{}|{}|{}".format(x.get("slot",0),x.get("host","") or "",x.get("country","") or "",x.get("region","") or "",x.get("exit_ip","") or "",x.get("status","") or ""))
+except Exception: pass
+' 2>/dev/null
+  else
+    echo "$json" | sed -n 's/.*"exits":\[//p' | sed 's/},{/}\n{/g' | while IFS= read -r x; do
+      slot=$(echo "$x" | sed -n 's/.*"slot":\([0-9]*\).*/\1/p'); host=$(echo "$x" | sed -n 's/.*"host":"\([^"]*\)".*/\1/p'); country=$(echo "$x" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p'); region=$(echo "$x" | sed -n 's/.*"region":"\([^"]*\)".*/\1/p'); ip=$(echo "$x" | sed -n 's/.*"exit_ip":"\([^"]*\)".*/\1/p'); status=$(echo "$x" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+      [[ -n "$slot" ]] && echo "$slot|$host|$country|$region|$ip|$status"
+    done
+  fi
+}
+
+# 让用户从现有出口中选择，而不是手工输入 HostName。
+choose_argo_exit() {
+  local rows i choice selected host
+  rows=$(argo_list_exits)
+  echo
+  echo -e "  ${B}请选择 fanout 出口：${N}"
+  echo
+  if [[ -z "$rows" ]]; then
+    echo -e "  ${R}当前没有可用出口。${N}"
+    echo "  请先在 fanout 出口管理中创建并启动至少一个出口。"
+    return 1
+  fi
+  printf "  %-4s %-24s %-10s %-8s %-18s %s\n" "ID" "HostName" "国家" "地区" "出口 IP" "状态"
+  echo "$rows" | while IFS='|' read -r slot host country region ip status; do
+    printf "  %-4s %-24s %-10s %-8s %-18s %s\n" "$slot" "$host" "${country:--}" "${region:--}" "${ip:--}" "${status:--}"
+  done
+  echo
+  read -rp "  选择出口 ID（0 返回）: " choice
+  [[ "$choice" == 0 ]] && return 1
+  selected=$(echo "$rows" | awk -F'|' -v n="$choice" '$1==n {print; exit}')
+  if [[ -z "$selected" ]]; then
+    echo -e "  ${R}无效的出口 ID${N}"
+    return 1
+  fi
+  IFS='|' read -r _ host _ _ _ _ <<< "$selected"
+  [[ -n "$host" ]] || { echo -e "  ${R}所选出口没有 HostName${N}"; return 1; }
+  ARGO_SELECTED_EXIT="$host"
+  ARGO_SELECTED_EXIT_ROW="$selected"
+  return 0
+}
+
 argo_menu() {
   need_root
-  local ck json choice protocol mode host token exit id action
+  local ck json choice protocol mode host token exit id action port bp resp yes
   while true; do
     clear; echo -e "${B}  fanout Argo${N}  ${D}Cloudflare Tunnel → fanout 出口${N}"; echo
     ck=$(argo_api_login); port=$(web_port); bp=$(cat "$WORK_DIR/basepath" 2>/dev/null || true)
     json=$(curl -s --max-time 8 -b "$ck" "http://127.0.0.1:${port}/${bp}/api/argo" 2>/dev/null || echo '[]'); rm -f "$ck"
     if command -v python3 >/dev/null 2>&1; then
-      echo "$json" | python3 -c 'import json,sys; a=json.load(sys.stdin); print("  %-4s %-7s %-7s %-28s %-18s %s"%("ID","协议","模式","域名","出口","状态")); [print("  %-4s %-7s %-7s %-28s %-18s %s"%(x.get("id",""),x.get("protocol",""),x.get("mode",""),x.get("hostname","") or "(等待)",x.get("exit_host",""),x.get("status",""))) for x in a]' 2>/dev/null || echo '  无法解析 Argo 列表'
+      echo "$json" | python3 -c 'import json,sys; a=json.load(sys.stdin); print("  %-4s %-7s %-7s %-28s %-18s %s"%( "ID","协议","模式","域名","出口","状态")); [print("  %-4s %-7s %-7s %-28s %-18s %s"%(x.get("id",""),x.get("protocol",""),x.get("mode",""),x.get("hostname","") or "(等待)",x.get("exit_host",""),x.get("status",""))) for x in a]' 2>/dev/null || echo '  无法解析 Argo 列表'
     else
       echo "$json"
     fi
@@ -313,8 +239,12 @@ argo_menu() {
         protocol=vless; [[ "$choice" == 2 ]] && protocol=vmess
         echo; echo "  选择模式: 1) 固定 Tunnel  2) Quick Tunnel"; read -rp "  模式: " mode
         [[ "$mode" == 1 ]] && mode=fixed || mode=quick
-        read -rp "  fanout 出口 HostName: " exit
-        [[ -z "$exit" ]] && { echo "  必须指定出口 HostName"; pause; continue; }
+
+        # 新逻辑：动态显示现有 fanout 出口，用户只选择 ID。
+        if ! choose_argo_exit; then pause; continue; fi
+        exit="$ARGO_SELECTED_EXIT"
+        echo -e "\n  已选择出口: ${G}${exit}${N}"
+
         host=""; token=""
         if [[ "$mode" == fixed ]]; then read -rp "  Argo 域名: " host; read -rsp "  Tunnel Token: " token; echo; fi
         ck=$(argo_api_login); resp=$(curl -s --max-time 30 -b "$ck" -X POST \
@@ -357,7 +287,6 @@ menu() {
     echo "   0) 退出"
     echo -e "${D}  ─────────────────────────────${N}"
     read -rp "  选择: " choice
-
     case "$choice" in
       1) svc_start   && echo -e "\n  ${G}已启动${N}"; pause ;;
       2) svc_stop    && echo -e "\n  ${Y}已停止${N}"; pause ;;
@@ -368,15 +297,7 @@ menu() {
       7) change_port; pause ;;
       8) reset_password; pause ;;
       9) reset_basepath; pause ;;
-      10)
-        if svc_is_enabled; then
-          svc_disable
-          echo -e "\n  ${Y}已关闭开机自启${N}"
-        else
-          svc_enable
-          echo -e "\n  ${G}已开启开机自启${N}"
-        fi
-        pause ;;
+      10) if svc_is_enabled; then svc_disable; echo -e "\n  ${Y}已关闭开机自启${N}"; else svc_enable; echo -e "\n  ${G}已开启开机自启${N}"; fi; pause ;;
       11) do_update; pause ;;
       13) show_links; pause ;;
       14) argo_menu ;;
@@ -388,22 +309,17 @@ menu() {
 }
 
 need_root
-
-# 带参数时当普通命令用，不进菜单
 case "${1:-}" in
-  start)    svc_start ;;
-  stop)     svc_stop ;;
-  restart)  svc_restart ;;
-  status)   svc_status_page ;;
-  log)      svc_logs_follow ;;
-  info)     show_info ;;
-  list)     list_tunnels ;;
-  update)   do_update ;;
+  start) svc_start ;;
+  stop) svc_stop ;;
+  restart) svc_restart ;;
+  status) svc_status_page ;;
+  log) svc_logs_follow ;;
+  info) show_info ;;
+  list) list_tunnels ;;
+  update) do_update ;;
   uninstall) do_uninstall ;;
   argo) argo_menu ;;
-  "")       menu ;;
-  *)
-    echo "用法: f [start|stop|restart|status|log|info|list|update|uninstall|argo]"
-    echo "不带参数进入交互菜单"
-    ;;
+  "") menu ;;
+  *) echo "用法: f [start|stop|restart|status|log|info|list|update|uninstall|argo]"; echo "不带参数进入交互菜单" ;;
 esac
