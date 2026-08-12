@@ -1,7 +1,9 @@
-name: release
+name: build-and-publish
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -36,6 +38,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME:-dev}"
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o fanout .
 
@@ -72,15 +75,53 @@ jobs:
             fanout-linux-${{ matrix.goarch }}.tar.gz
             fanout-linux-${{ matrix.goarch }}.sha256
 
-  release:
+  publish-dist:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: 生成校验和
+        run: sha256sum fanout-linux-*.tar.gz > checksums.txt
+
+      - name: 发布 raw 安装源到 dist 分支
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p /tmp/fanout-dist
+          cp fanout-linux-*.tar.gz /tmp/fanout-dist/
+          cp checksums.txt /tmp/fanout-dist/
+
+          if git ls-remote --exit-code --heads origin dist >/dev/null 2>&1; then
+            git fetch origin dist
+            git checkout -B dist origin/dist
+          else
+            git checkout --orphan dist
+          fi
+
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp /tmp/fanout-dist/* .
+          printf '%s\n' "fanout raw installation artifacts" > README.md
+          git add -A
+          git diff --cached --quiet || git commit -m "publish ${GITHUB_REF_NAME} artifacts"
+          git push origin dist
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -95,30 +136,3 @@ jobs:
             fanout-linux-*.tar.gz
             checksums.txt
           generate_release_notes: true
-
-      - name: 发布 raw 安装源到 dist 分支
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # 保存构建产物，切到独立的 dist 分支后只保留可由
-          # raw.githubusercontent.com 直接下载的预编译包。
-          mkdir -p /tmp/fanout-dist
-          cp fanout-linux-*.tar.gz /tmp/fanout-dist/
-          cp checksums.txt /tmp/fanout-dist/
-
-          if git show-ref --verify --quiet refs/remotes/origin/dist; then
-            git checkout -B dist origin/dist
-          else
-            git checkout --orphan dist
-          fi
-
-          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp /tmp/fanout-dist/* .
-          printf '%s\n' "fanout raw installation artifacts" > README.md
-          git add -A
-          git diff --cached --quiet || git commit -m "publish ${GITHUB_REF_NAME} artifacts"
-          git push origin dist
