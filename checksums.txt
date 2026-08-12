@@ -1,2 +1,2 @@
-a203d6158e5f48e1e694ab74f37c956d795bb5db8d0097f85dcc3189fbe5b042  fanout-linux-amd64.tar.gz
-6e5aa0ef1a5ad62b623d31efd2fdbb4208e1d45405721262059b1641664bac74  fanout-linux-arm64.tar.gz
+224f2ee7155ff7dc7d75745dce9edfac7533426adc2cd5e3debf4bf51a2a8269  fanout-linux-amd64.tar.gz
+5b675139a7c481113e9c8c3c489cc65375c592746a46f251655d209187a97a8f  fanout-linux-arm64.tar.gz
