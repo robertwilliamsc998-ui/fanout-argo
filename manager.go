@@ -10,6 +10,8 @@ import (
 )
 
 // Manager 维护所有隧道，负责分配槽位与端口。
+// 出口一旦创建，默认永久绑定到用户选择的 VPN 节点；只有用户主动 Swap
+// 才会更换出口节点。不会因为连接失败、健康检查或刷新节点列表而自动换节点。
 type Manager struct {
 	mu       sync.RWMutex
 	tunnels  map[int]*Tunnel
@@ -29,6 +31,7 @@ func NewManager(maxSlots int, workDir string) *Manager {
 }
 
 // RefreshNodes 重新拉取节点列表。
+// 这只刷新“可供用户手工选择的出口节点列表”，不会改变任何已经存在的出口。
 func (m *Manager) RefreshNodes() (int, error) {
 	nodes, err := fetchNodes(60 * time.Second)
 	if err != nil {
@@ -70,7 +73,7 @@ func (m *Manager) freeSlot() (int, error) {
 	return 0, fmt.Errorf("槽位已满（上限 %d）", m.maxSlots)
 }
 
-// Start 为指定节点开一条隧道，返回分配到的本地端口。
+// Start 为用户指定节点开一条固定出口，返回分配到的本地端口。
 func (m *Manager) Start(node Node) (*Tunnel, error) {
 	m.mu.Lock()
 	slot, err := m.freeSlot()
@@ -78,7 +81,6 @@ func (m *Manager) Start(node Node) (*Tunnel, error) {
 		m.mu.Unlock()
 		return nil, err
 	}
-	// 端口随机取，避免固定规律撞上机器上的其他服务
 	taken := map[int]bool{}
 	for _, other := range m.tunnels {
 		taken[other.Port] = true
@@ -108,35 +110,31 @@ func (m *Manager) Start(node Node) (*Tunnel, error) {
 	return t, nil
 }
 
-// bringUp 把一条隧道拉起来。
-//
-// notify 决定成功后是否立刻重建后端配置。换节点重连时要传 false：
-// 那条路径随后会调 rebind/resync 把入站改绑到新节点，在那之前重建配置
-// 会因为入站还指着旧节点名而把路由规则丢掉。
+// bringUp 只连接当前已经选定的节点，不自动寻找替代节点。
 func (m *Manager) bringUp(t *Tunnel, notify bool) {
 	m.bringUpPersist(t, notify, false)
 }
 
-// 自动重连的退避区间：一轮候选全挂后等一会儿再刷新节点列表重来，
-// 别把死节点列表打爆，也别让恢复拖太久。
+// 固定出口的重连退避。
+// 注意：退避期间仍然只重连原节点，不刷新候选节点、不自动换出口。
 const (
 	reconnectBackoffMin = 5 * time.Second
 	reconnectBackoffMax = 60 * time.Second
 )
 
-// bringUpPersist 把一条隧道拉起来。
+// bringUpPersist 把一条固定出口拉起来。
 //
-// persist=false（手动新建）：走一轮候选，全失败就标 failed，让用户能立刻看到并重试。
-// persist=true（自动重连 / 重启恢复）：一轮全失败不放弃，退避后刷新节点列表再来一轮，
-// 一直循环到连上或这条隧道被用户停掉。VPN Gate 死节点多，"当前都不可用"往往只是
-// 这一批候选恰好都挂了，过一会儿就有新节点，不该让出口永久躺死。
+// persist=false（手动创建）：只尝试用户选择的节点；失败后标记 failed。
+// persist=true（重启恢复）：只重试保存下来的同一个节点，直到连接成功或被用户停止。
+//
+// 绝不自动调用 RefreshNodes，也绝不按地区挑选其它 VPN 节点。
 func (m *Manager) bringUpPersist(t *Tunnel, notify bool, persist bool) {
 	backoff := reconnectBackoffMin
 	for {
 		if m.tryCandidates(t, notify) {
 			return
 		}
-		// 隧道已被用户停掉或从管理器移除，别再重试
+
 		if !persist || !m.tunnelActive(t) {
 			if persist {
 				return
@@ -149,14 +147,11 @@ func (m *Manager) bringUpPersist(t *Tunnel, notify bool, persist bool) {
 		}
 
 		t.Status = "starting"
-		t.Err = fmt.Sprintf("暂无可用节点，%.0f 秒后重试", backoff.Seconds())
-		log.Printf("隧道 %d 一轮候选均失败，%.0f 秒后刷新节点重试", t.Slot, backoff.Seconds())
+		t.Err = fmt.Sprintf("固定出口节点暂时不可用，%.0f 秒后重试（不会自动换节点）", backoff.Seconds())
+		log.Printf("固定出口 %d 节点 %s 连接失败，%.0f 秒后重试原节点", t.Slot, t.Node.HostName, backoff.Seconds())
 		time.Sleep(backoff)
 		if !m.tunnelActive(t) {
 			return
-		}
-		if _, err := m.RefreshNodes(); err != nil {
-			log.Printf("重试前刷新节点列表失败: %v", err)
 		}
 		if backoff < reconnectBackoffMax {
 			backoff *= 2
@@ -167,45 +162,36 @@ func (m *Manager) bringUpPersist(t *Tunnel, notify bool, persist bool) {
 	}
 }
 
-// tryCandidates 走一轮候选节点，成功返回 true。失败不改 Status（留给调用方决定）。
+// tryCandidates 保留旧函数名以兼容现有调用，但现在只允许当前节点。
+// 不再使用同地区候选节点自动切换。
 func (m *Manager) tryCandidates(t *Tunnel, notify bool) bool {
-	// VPN Gate 是志愿者节点，列表里有相当比例已下线或满员（AUTH_FAILED），
-	// 连不上就顺着候选列表换下一个，不必让用户手动试。
-	candidates := m.candidatesFor(t.Node)
-	for i, node := range candidates {
-		if !m.tunnelActive(t) {
-			return false
-		}
-		// 其他隧道可能在重试期间占用了这个节点，跳过以免多个端口撞同一出口 IP
-		if i > 0 && m.nodeInUse(node.HostName, t.Slot) {
-			continue
-		}
-		t.Node = node
-		t.Status = "starting"
-		if i > 0 {
-			t.Err = fmt.Sprintf("已换到第 %d 个候选节点", i+1)
-		}
-
-		err := m.tryNode(t)
-		if err == nil {
-			t.Status = "up"
-			t.Err = ""
-			if serr := m.saveState(); serr != nil {
-				log.Printf("保存状态失败: %v", serr)
-			}
-			if notify {
-				m.notifyPanel()
-			}
-			return true
-		}
-		t.teardownNetns()
+	if !m.tunnelActive(t) {
+		return false
 	}
+
+	node := t.Node
+	t.Status = "starting"
+	t.Err = ""
+
+	if err := m.tryNode(t); err == nil {
+		t.Status = "up"
+		t.Err = ""
+		if serr := m.saveState(); serr != nil {
+			log.Printf("保存状态失败: %v", serr)
+		}
+		if notify {
+			m.notifyPanel()
+		}
+		return true
+	} else {
+		t.Err = fmt.Sprintf("节点 %s 连接失败: %v", node.HostName, err)
+	}
+
+	t.teardownNetns()
 	return false
 }
 
 // tunnelActive 判断这条隧道是否还归管理器所有且未被用户停掉。
-// 用指针比对：Stop 会从 map 里删除并把 Status 置 stopped，
-// 重连循环据此退出，避免对着一条已经不存在的隧道空转。
 func (m *Manager) tunnelActive(t *Tunnel) bool {
 	if t.Status == "stopped" {
 		return false
@@ -237,44 +223,9 @@ func (m *Manager) tryNode(t *Tunnel) error {
 	return nil
 }
 
-// candidatesFor 以指定节点打头，后面跟上同地区的其他节点作为备选。
+// candidatesFor 保留接口兼容性，但固定出口模式下永远只返回用户选择的节点。
 func (m *Manager) candidatesFor(first Node) []Node {
-	const maxTries = 6
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	used := map[string]bool{first.HostName: true}
-	for _, t := range m.tunnels {
-		used[t.Node.HostName] = true
-	}
-
-	// 地区决定了备选范围，缺失时先从当前列表补一次，
-	// 否则会退化成"任意地区都算同区"。
-	region := first.CountryCode
-	if region == "" {
-		for _, n := range m.nodes {
-			if n.HostName == first.HostName {
-				region = n.CountryCode
-				break
-			}
-		}
-	}
-
-	out := []Node{first}
-	for _, n := range m.nodes {
-		if len(out) >= maxTries {
-			break
-		}
-		if used[n.HostName] {
-			continue
-		}
-		// 地区实在拿不到时不做限制，总比连不上强
-		if region != "" && n.CountryCode != region {
-			continue
-		}
-		out = append(out, n)
-	}
-	return out
+	return []Node{first}
 }
 
 // Stop 停掉一条隧道并释放槽位。
@@ -297,10 +248,8 @@ func (m *Manager) Stop(slot int) error {
 	return nil
 }
 
-// Swap 把一条隧道换到同地区的另一个节点上，端口与已分发的客户端配置保持不变。
-//
-// 与健康检查的自动重连不同：那边优先重连原节点（目标是恢复），
-// 这里用户是嫌当前出口 IP 不好用，必须真的换一个。
+// Swap 是唯一会改变固定出口目标节点的操作，必须由用户主动调用。
+// 端口与已经分发的客户端配置保持不变。
 func (m *Manager) Swap(slot int) error {
 	m.mu.RLock()
 	t, ok := m.tunnels[slot]
@@ -312,7 +261,6 @@ func (m *Manager) Swap(slot int) error {
 		return fmt.Errorf("这个出口正在连接中，稍等一下")
 	}
 
-	// pickNodes 已排除所有在用节点，拿到的必然不是当前这个
 	picks, err := m.pickNodes(t.Node.CountryCode, 1)
 	if err != nil {
 		return err
@@ -331,9 +279,6 @@ func (m *Manager) StopAll() {
 }
 
 // SetCred 改一条出口的 SOCKS5 凭据。cred 两个字段都为空表示随机重置。
-//
-// 改完要通知后端：本机 Xray 的 socks 出站里带着这套凭据，
-// 不同步的话面板侧的节点会立刻连不上自己的出口。
 func (m *Manager) SetCred(slot int, cred SocksCred) (SocksCred, error) {
 	m.mu.RLock()
 	t, ok := m.tunnels[slot]
@@ -362,17 +307,12 @@ func (m *Manager) SetCred(slot int, cred SocksCred) (SocksCred, error) {
 }
 
 // ReconcileOutbounds 在启动恢复隧道后跑一次，把后端出站对齐到当前隧道（含 SOCKS5 凭据）。
-//
-// 只为 3x-ui 模式而生：它的 OnTunnelsChanged 是空操作，重启不会重写面板出站，
-// 而从旧版本升上来时面板里持久化的 socks 出站没有认证字段，端口一旦要认证就连不上。
-// 自建模式恢复时每条隧道 up 都会重建配置，本就自洽，这里跳过免得多重启一次 Xray。
 func (m *Manager) ReconcileOutbounds() {
 	p, err := openPanel()
 	if err != nil || p.Kind() != "3x-ui" {
 		return
 	}
 
-	// 等隧道尽量都起完再重写一次，避免只覆盖到先 up 的那几条
 	deadline := time.Now().Add(90 * time.Second)
 	for {
 		tunnels := m.Tunnels()
@@ -396,16 +336,12 @@ func (m *Manager) ReconcileOutbounds() {
 			return
 		}
 		if settled || time.Now().After(deadline) {
-			return // 全 failed，没有可写的出站
+			return
 		}
 		time.Sleep(2 * time.Second)
 	}
 }
 
-// syncCred 把新凭据写进后端的 socks 出站。
-//
-// 两种后端的做法不同：自建模式整份重建配置，3x-ui 模式只改出站那一段。
-// 都走 ResyncOutbound，接口语义正好是"重写这条隧道对应的出站"。
 func (m *Manager) syncCred(t *Tunnel) {
 	if err := m.resync(t); err != nil {
 		log.Printf("同步 SOCKS5 凭据到节点链接后端失败: %v", err)
@@ -440,7 +376,6 @@ func (m *Manager) nodeInUse(host string, exceptSlot int) bool {
 }
 
 // rebind 在隧道换节点后，把原先指向旧节点的 3x-ui 入站改绑到新节点。
-// 面板不可用时静默跳过，健康检查本身不应因此失败。
 func (m *Manager) rebind(oldHost string, t *Tunnel) error {
 	x, err := openPanel()
 	if err != nil {
@@ -450,7 +385,6 @@ func (m *Manager) rebind(oldHost string, t *Tunnel) error {
 }
 
 // resync 在节点没换但重连过之后，把 3x-ui 的出站配置刷新一遍。
-// 面板不可用时静默跳过，健康检查本身不应因此失败。
 func (m *Manager) resync(t *Tunnel) error {
 	x, err := openPanel()
 	if err != nil {
@@ -460,10 +394,6 @@ func (m *Manager) resync(t *Tunnel) error {
 }
 
 // notifyPanel 告诉后端隧道集合变了。
-//
-// 自建模式下出站是由隧道列表现算出来的，不通知的话新开的出口在 Xray 里
-// 没有对应的 socks 出站，绑定会指向一个不存在的 tag。接管 3x-ui 时是空操作。
-// 后端不可用不该让开关出口失败，所以只记日志。
 func (m *Manager) notifyPanel() {
 	p, err := openPanel()
 	if err != nil {
