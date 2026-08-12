@@ -1,0 +1,155 @@
+name: finalize-manual-binding
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Remove automatic node cloning/provisioning
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def remove_func(path, name):
+              p = Path(path)
+              s = p.read_text()
+              # Find a Go function declaration containing the requested name,
+              # then remove the complete balanced-brace body.
+              pat = re.compile(r'(?m)^func(?:\s+\([^\n]*\))?\s+' + re.escape(name) + r'\s*\([^\n]*\)\s*(?:\([^\n]*\)|[^\n]*)\s*\{')
+              m = pat.search(s)
+              if not m:
+                  raise SystemExit(f'{path}: function {name} not found')
+              start = m.start()
+              brace = s.find('{', m.start(), m.end())
+              depth = 0
+              i = brace
+              in_str = None
+              esc = False
+              in_line = False
+              in_block = False
+              while i < len(s):
+                  c = s[i]
+                  n = s[i+1] if i + 1 < len(s) else ''
+                  if in_line:
+                      if c == '\n': in_line = False
+                  elif in_block:
+                      if c == '*' and n == '/': in_block = False; i += 1
+                  elif in_str:
+                      if esc: esc = False
+                      elif c == '\\': esc = True
+                      elif c == in_str: in_str = None
+                  else:
+                      if c == '/' and n == '/': in_line = True; i += 1
+                      elif c == '/' and n == '*': in_block = True; i += 1
+                      elif c in ('"', '`', "'"): in_str = c
+                      elif c == '{': depth += 1
+                      elif c == '}':
+                          depth -= 1
+                          if depth == 0:
+                              end = i + 1
+                              # consume one following blank line
+                              if end < len(s) and s[end] == '\n': end += 1
+                              s = s[:start] + s[end:]
+                              p.write_text(s)
+                              return
+                  i += 1
+              raise SystemExit(f'{path}: unmatched braces in {name}')
+
+          # main.go: route + handler
+          p = Path('main.go')
+          s = p.read_text()
+          s2 = s.replace('\n\tmux.HandleFunc("/api/xui/clone", apiXUIClone(mgr))', '')
+          if s2 == s:
+              raise SystemExit('main.go: clone route not found')
+          p.write_text(s2)
+          remove_func('main.go', 'apiXUIClone')
+
+          # panel interface
+          p = Path('panel.go')
+          s = p.read_text()
+          lines = s.splitlines(True)
+          kept = [x for x in lines if 'CloneToTunnels(templateID int, hosts []string, tunnels []*Tunnel)' not in x]
+          if len(kept) == len(lines):
+              raise SystemExit('panel.go: CloneToTunnels interface entry not found')
+          p.write_text(''.join(kept))
+
+          # native and xui implementations
+          remove_func('native.go', 'CloneToTunnels')
+          remove_func('xui.go', 'CloneToTunnels')
+
+          # Remove automatic provisioning of nodes. Provision now only starts exits.
+          p = Path('provision.go')
+          s = p.read_text()
+          s = s.replace('\n\tTemplateID int // 3x-ui 入站模板；0 表示只开隧道不建入站', '')
+          s = s.replace('\n\tif req.TemplateID > 0 {\n\t\tlabels = append(labels, "创建节点链接")\n\t}', '')
+          s = s.replace('go m.runProvision(job, picks, req.TemplateID)', 'go m.runProvision(job, picks)')
+          start = s.find('func (m *Manager) runProvision(job *Job, picks []Node, templateID int) {')
+          if start < 0:
+              raise SystemExit('provision.go: runProvision signature not found')
+          # Keep the function body only through wg.Wait(); then return.
+          marker = '\twg.Wait()\n'
+          pos = s.find(marker, start)
+          if pos < 0:
+              raise SystemExit('provision.go: wg.Wait not found')
+          body_end = pos + len(marker)
+          # Find matching closing brace of the function and replace the whole tail logic.
+          s = s[:start] + 'func (m *Manager) runProvision(job *Job, picks []Node) {\n\tdefer job.Finish()\n\n\tvar wg sync.WaitGroup\n\tstarted := make([]*Tunnel, len(picks))\n\n\tfor i, node := range picks {\n\t\tt, err := m.Start(node)\n\t\tif err != nil {\n\t\t\tjob.Set(i, "failed", err.Error())\n\t\t\tcontinue\n\t\t}\n\t\tstarted[i] = t\n\t\tjob.Set(i, "running", "正在连接 "+node.HostName)\n\t\twg.Add(1)\n\t\tgo func(i int, t *Tunnel) {\n\t\t\tdefer wg.Done()\n\t\t\tm.waitUp(t)\n\t\t\tif t.Status == "up" {\n\t\t\t\tjob.Set(i, "ok", t.ExitIP)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tjob.Set(i, "failed", firstLine(t.Err))\n\t\t}(i, t)\n\t}\n\twg.Wait()\n}\n\n' + s[body_end:]
+          p.write_text(s)
+
+          # Remove tests that specifically exercise the deleted clone API.
+          for path in ['native_test.go', 'xui_test.go', 'provision_test.go']:
+              p = Path(path)
+              if not p.exists():
+                  continue
+              text = p.read_text()
+              if 'CloneToTunnels' in text:
+                  # remove whole test functions whose body contains CloneToTunnels
+                  while 'CloneToTunnels' in text:
+                      idx = text.index('CloneToTunnels')
+                      begin = text.rfind('\nfunc Test', 0, idx)
+                      if begin < 0:
+                          raise SystemExit(f'{path}: cannot locate test function for CloneToTunnels')
+                      brace = text.find('{', begin, idx)
+                      depth = 0
+                      end = None
+                      for i in range(brace, len(text)):
+                          if text[i] == '{': depth += 1
+                          elif text[i] == '}':
+                              depth -= 1
+                              if depth == 0:
+                                  end = i + 1
+                                  break
+                      if end is None:
+                          raise SystemExit(f'{path}: unmatched test braces')
+                      text = text[:begin] + text[end:]
+                  p.write_text(text)
+          PY
+
+          gofmt -w *.go
+          go test ./...
+
+          # Verify the forbidden automatic-clone path is gone from Go sources.
+          if grep -RniE 'CloneToTunnels|apiXUIClone|/api/xui/clone' --include='*.go' .; then
+            echo 'automatic clone references remain'
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .github/workflows/finalize-manual-binding.yml
+          git add -A
+          git commit -m 'make manual node to exit binding the first version'
+          git push origin main
