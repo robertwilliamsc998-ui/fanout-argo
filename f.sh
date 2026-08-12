@@ -12,7 +12,8 @@ from pathlib import Path
 import sys
 p=Path(sys.argv[1])
 s=p.read_text()
-start=s.index('        host=""; token=""')
+# 只匹配 host 配置行的稳定前缀，避免 Bash/Python 引号嵌套导致 SyntaxError。
+start=s.index('        host=""')
 end=s.index('      3|4)', start)
 new=r'''        host=""; token=""; node_port=""
         if [[ "$mode" == fixed ]]; then
@@ -113,12 +114,7 @@ def vmess_from_uri(link):
     uuid=unquote(u.username)
     q=dict(parse_qsl(u.query,keep_blank_values=True))
     path=q.get('path') or unquote(u.path) or '/argo'
-    obj={
-        'v':'2','ps':q.get('remark') or q.get('name') or 'VMess-Argo',
-        'add':preferred,'port':'443','id':uuid,'aid':q.get('aid','0'),
-        'scy':q.get('scy','auto'),'net':'ws','type':'none','host':argo_host,
-        'path':path,'tls':'tls','sni':argo_host,
-    }
+    obj={'v':'2','ps':q.get('remark') or q.get('name') or 'VMess-Argo','add':preferred,'port':'443','id':uuid,'aid':q.get('aid','0'),'scy':q.get('scy','auto'),'net':'ws','type':'none','host':argo_host,'path':path,'tls':'tls','sni':argo_host}
     return 'vmess://'+base64.b64encode(json.dumps(obj,separators=(',',':'),ensure_ascii=False).encode('utf-8')).decode('ascii')
 
 def vmess_from_base64(link):
@@ -133,15 +129,12 @@ try:
         body=link.split('://',1)[1]
         print(vmess_from_uri(link) if '@' in body else vmess_from_base64(link))
     elif link.lower().startswith('vless://'):
-        u=urlsplit(link); q=dict(parse_qsl(u.query,keep_blank_values=True))
-        q['type']='ws'; q['security']='tls'; q['encryption']='none'; q['host']=argo_host; q['sni']=argo_host
-        q['path']=q.get('path') or unquote(u.path) or '/argo'
+        u=urlsplit(link); q=dict(parse_qsl(u.query,keep_blank_values=True)); q['type']='ws'; q['security']='tls'; q['encryption']='none'; q['host']=argo_host; q['sni']=argo_host; q['path']=q.get('path') or unquote(u.path) or '/argo'
         print('vless://'+(u.username or '')+'@'+preferred+':443?'+urlencode(q)+'#'+(u.fragment or 'VLESS-Argo'))
     else:
         print(link)
 except Exception as e:
-    print('NODE_BUILD_ERROR:'+str(e),file=sys.stderr)
-    print(link)
+    print('NODE_BUILD_ERROR:'+str(e),file=sys.stderr); print(link)
 PY2
         }
 
