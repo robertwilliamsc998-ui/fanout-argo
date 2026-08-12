@@ -1,225 +1,166 @@
-# fanout
+# fanout-argo
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+Fanout + VPN Gate 出口管理 + Xray/3x-ui 节点绑定 + Cloudflare Argo。
 
-把 VPN Gate 的公共节点变成本地 SOCKS5 端口：一个端口一个出口 IP。
-再给每个出口挂一个节点链接，客户端连哪个端口就从哪个国家出去。
+## 核心设计
 
-节点链接有两种管法：同机装了 3x-ui 就接管面板里的入站，没装则 fanout
-自己跑 Xray，建站、改站、发链接都在同一个界面里完成。
+**出口和节点完全分离。**
 
-![主界面](https://images.joeyblog.net/2026/7/27/fanout-dashboard.png)
+- 出口可以是 1 个或多个。
+- 出口 HostName、地区、出口 IP、SOCKS5 端口均由 VPN Gate 运行时动态返回。
+- 程序不假定固定的 1/2/3 个出口，也不写死任何 HostName。
+- 节点由用户**手工创建**。
+- 节点由用户**手工绑定**到指定出口。
+- 一个节点只绑定一个固定出口。
+- 一个出口可以绑定 0 个、1 个或多个节点。
+- 新增出口不会自动生成节点。
+- 不提供按出口复制/克隆节点的功能。
+- 节点的 UUID、密码、端口、路径等不会因为新增出口而自动复制或改变。
 
-四条隧道跑在一台机器上，四个端口对应四个国家的出口，母机自己的 IP 不受影响：
+## 数据流
 
-![出口验证](https://images.joeyblog.net/2026/7/26/fanout-6-exit-ip.png)
+```text
+VPN Gate 动态出口
+    ├── 出口 A / 随机 HostName / 随机 SOCKS5
+    ├── 出口 B / 随机 HostName / 随机 SOCKS5
+    └── 出口 N / 随机 HostName / 随机 SOCKS5
 
-## 原理
-
-### Argo 双入口（v1.2.0-final6）
-
-在保留 fanout 原有出口模式的基础上，可为 VLESS-WS / VMess-WS 分别创建 Argo Tunnel，
-并把每条 Argo 入站绑定到指定 fanout 出口。Argo 管理命令：
-
-```bash
-f argo
+手工节点 1 ──手工绑定──> 出口 A
+手工节点 2 ──手工绑定──> 出口 B
+手工节点 3 ──手工绑定──> 出口 N
 ```
 
-final6 特别处理了 Argo 生命周期：VPS 重启会重新从 Xray 入站恢复 Client UUID；
-手动 Stop 会禁止自动恢复，手动 Start 会解除禁用并重新同步 UUID；Quick Tunnel
-会等待 `trycloudflare.com` 域名后再标记为可用；同一 Argo 的 UUID 恢复任务不会重复并发。
+例如：
 
-每个节点跑在独立的 network namespace 里，netns 内启动官方 openvpn 客户端。
-SOCKS5 监听在母机，出站连接用 `setns` 切进对应 netns 建立。
-
-这样做的好处：VPN 的路由劫持只影响自己的 netns，不会切断母机的网络；
-多个节点互不干扰，各自一个出口 IP。
-
+```text
+VLESS 节点 22521
+    ↓
+BoundTo = vpn122916437
+    ↓
+fanout-vpn122916437
+    ↓
+SOCKS5 127.0.0.1:31344
+    ↓
+VPN Gate / Japan
 ```
-客户端 ──> 母机 SOCKS5 :随机端口 ──> netns foN ──> openvpn ──> VPN Gate 节点
+
+`vpn122916437` 只是某一次运行时由 VPN Gate 返回的 HostName，不是固定出口名称。
+
+## 固定出口绑定
+
+节点绑定关系持久化在：
+
+```text
+/var/lib/fanout/native.json
 ```
+
+核心字段：
+
+```json
+{
+  "id": 2,
+  "port": 22521,
+  "protocol": "vless",
+  "remark": "vless-22521",
+  "bound_to": "vpn122916437"
+}
+```
+
+Xray 配置会根据 `bound_to` 精确生成对应的 SOCKS5 outbound 和 routing rule：
+
+```text
+inbound
+  ↓
+fanout-<出口HostName>
+  ↓
+127.0.0.1:<该出口随机 SOCKS5 端口>
+  ↓
+VPN Gate
+```
+
+因此不会出现“节点自动平均分配出口”或“所有节点默认共用第一个出口”。
+
+没有绑定出口的节点不会自动挑选一个出口。
+
+## 出口管理
+
+Web 管理界面可以：
+
+1. 拉取 VPN Gate 节点列表。
+2. 启动一个或多个出口。
+3. 查看每个出口的动态 HostName、地区、IP 和 SOCKS5 端口。
+4. 停止出口或重新选择出口。
+5. 手工维护节点与出口的绑定关系。
+
+出口数量没有固定的 1/2/3 限制，实际数量受 `-max` 参数和服务器资源限制。
+
+## 节点管理
+
+### Native 模式
+
+fanout 自己运行 Xray。用户手工新建 VLESS / VMess / Trojan 等入站，然后在节点详情中选择一个正在运行的出口绑定。
+
+### 3x-ui 模式
+
+fanout 接管现有 3x-ui 的 Xray 配置，只负责把已有入站路由到用户指定的 VPN Gate 出口。
+
+### 明确不会做的事情
+
+- 不会因为创建出口自动生成一个节点。
+- 不会根据一个模板批量复制节点。
+- 不会因为新增出口复制现有节点。
+- 不会把一个节点同时绑定多个出口。
+
+## Argo
+
+Argo/Cloudflare Tunnel 是入口，VPN Gate 是最终出口，两者是不同层次：
+
+```text
+客户端
+   ↓
+Cloudflare Tunnel / Argo
+   ↓
+Xray 节点入站
+   ↓
+节点手工绑定的 VPN Gate 出口
+   ↓
+最终出口 IP
+```
+
+Argo 入站同样可以绑定指定的 fanout 出口，不应把 Argo 名称当成 VPN Gate 出口名称。
 
 ## 安装
 
-需要 root，Linux（依赖 netns）。
-
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/main/install.sh)
 ```
 
-会自动下载对应架构的预编译二进制。也可以 clone 仓库后在源码目录运行同一个脚本，
-那样会从源码编译（需要 Go 1.24+）。
+需要 root，并要求宿主机具备 `/dev/net/tun`、network namespace、iptables 等能力。
 
-依赖（openvpn / curl / openssl / iproute / iptables）会按发行版自动装，
-apt、dnf、yum、pacman、apk、zypper 都认。没装 3x-ui 时还会顺带下载一份
-Xray 到 `/var/lib/fanout/bin/`，装了则跳过，入站交给面板管。
-
-服务用 systemd 或 OpenRC 都能装，装完自动开机自启。
-
-**Alpine** 默认不带 bash，先装一下：
+## 运行
 
 ```bash
-apk add bash
-bash <(curl -fsSL https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/main/install.sh)
+f
 ```
 
-另外 fanout 要在 netns 里跑 openvpn，**宿主必须放开 `/dev/net/tun`**。
-不少 LXC 小鸡没给这个权限，`ls /dev/net/tun` 不存在且 `mknod` 报
-Operation not permitted 的话，这台机器用不了，跟发行版无关。
+默认 Web 端口：`8899`。
 
-装完敲 `f` 打开管理菜单：
+工作目录：
 
-![管理菜单](https://images.joeyblog.net/2026/7/26/fanout-7-menu.png)
-
-装完会打印管理界面地址、访问路径和口令：
-
-```
-管理界面  http://<你的IP>:8899/gwPuWHvaNr/
-访问口令  f81120ac328d11c11b
+```text
+/var/lib/fanout/
 ```
 
-路径和口令都是随机生成的，分别存在 `/var/lib/fanout/basepath` 和
-`/var/lib/fanout/password`。路径不对一律返回 404，扫端口的看不到这里跑着什么。
+主要文件：
 
-## 使用
-
-界面以**出口**为单位：一行就是一条隧道加上挂在它上面的节点链接。
-
-点「新建出口」，选地区和数量，再选一个已有节点作模板，提交后 fanout 会并行
-拉起隧道、为每个出口复制一份节点链接并绑好，进度按目标逐条回报。原来要手点
-五步跨两栏的事，现在一次点击十几秒完成。
-
-![新建出口](https://images.joeyblog.net/2026/7/27/fanout-wizard.png)
-
-每行右侧两个按钮：换一个节点（出口 IP 变、端口不变，已分发的客户端配置不用改），
-或者停掉这个出口。
-
-点节点名进详情，可以改端口、备注、启停，管理客户端，以及改绑到别的出口：
-
-![节点详情](https://images.joeyblog.net/2026/7/27/fanout-detail.png)
-
-一个入站可以挂多套客户端凭据，分发给不同的人；每套都能单独重置，
-重置后旧链接立即失效。
-
-「导出链接」一次性拿到所有节点链接：
-
-![导出链接](https://images.joeyblog.net/2026/7/27/fanout-export.png)
-
-### 节点链接从哪来
-
-同机装了 3x-ui 就直接接管面板里的入站，面板端口、路径、API token 全自动探测，
-开了 SSL 也能识别。没装 3x-ui 时 fanout 自己跑一个 Xray，界面上多一个「新建节点」
-按钮，可以选协议（VLESS / VMess / Trojan）、传输（TCP / WebSocket / gRPC /
-HTTPUpgrade / XHTTP）和安全层（无 / TLS / REALITY）。
-
-![新建节点](https://images.joeyblog.net/2026/7/27/fanout-newnode.png)
-
-REALITY 的密钥对和 shortId 自动生成；TLS 不填证书就生成自签的，分享链接会带上
-证书指纹让客户端固定信任。也可以填自己的证书路径。
-
-两种模式下改端口、启停、加删客户端、绑定出口的操作完全一致，用起来没有区别。
-想固定用哪种，加 `-panel 3x-ui` 或 `-panel native` 启动参数。
-
-## 运维
-
-装完后敲 `f` 打开管理菜单：启停、看日志、查隧道、改端口/口令/访问路径、更新、卸载。
-
-```
-  状态      运行中
-  版本      fanout v1.2.0
-  开机自启  enabled
-
-  管理地址  http://1.2.3.4:8899/gwPuWHvaNr/
-  访问口令  f81120ac328d11c11b
-
-   1) 启动          2) 停止
-   3) 重启          4) 查看日志
-   5) 隧道列表      6) 连接信息
-   7) 改端口        8) 改口令
-   9) 改访问路径   10) 开机自启开关
-  11) 更新         12) 卸载
+```text
+state.json       # 动态出口状态
+native.json      # Native 节点及手工 bound_to 关系
+xray.json        # 当前 Xray 运行配置
+argo.json        # Argo 配置
+settings.json    # Web 设置
 ```
 
-也可以直接带参数用：
+## 许可证
 
-```bash
-f info       # 连接信息
-f list       # 隧道列表
-f restart    # 重启
-f log        # 跟踪日志
-f update     # 更新到最新版
-f uninstall  # 卸载
-```
-
-隧道状态存在 `/var/lib/fanout/state.json`，重启后自动恢复，端口保持不变。
-
-健康检查每 10 秒跑一次，比对出口 IP 是否还是建立隧道时那个——openvpn 挂掉后
-netns 仍能经母机 NAT 出网，只看通不通会漏判。连续两次不符就自动换节点重连，
-槽位和端口不变，原先指向它的节点链接会自动改绑过去。
-
-## 已知限制
-
-- 只转发 TCP。SOCKS5 收到域名时在本机解析，隧道内不跑 UDP/DNS。
-- VPN Gate 是志愿者节点，有相当比例已下线或满员（`AUTH_FAILED`）。
-  启动时连不上会自动顺着同地区候选往下试，最多 6 个。
-- 管理界面只有随机路径 + 口令登录，没有 HTTPS。放公网建议前面套一层反代。
-
-## 许可
-
-[MIT](LICENSE)。
-
-节点来自 [VPN Gate](https://www.vpngate.net/)（筑波大学的学术实验项目），
-本工具只是调用其公开的节点列表并用官方 openvpn 客户端连接，不修改也不代理其服务。
-使用时请遵守 VPN Gate 的条款和你所在地的法律。
-
-## 交流
-
-- 交流群：<https://t.me/+ft-zI76oovgwNmRh>
-- 视频教程：<https://youtube.com/@joeyblog>
-- 博客：<https://joeyblog.net>
-
-用着有问题、或者想要什么功能，去群里说或提 issue。
-
-## Fanout Argo 增强版
-
-本版本在不改变 fanout 原有 VPN Gate / netns / SOCKS5 出口机制的前提下，增加 Cloudflare Tunnel（Argo）入口。
-
-数据路径：
-
-`客户端 → Cloudflare Tunnel → Xray WS 入站 → fanout 指定出口 → VPN Gate → 最终出口 IP`
-
-### 一键安装
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/robertwilliamsc998-ui/fanout-argo/main/install.sh)
-```
-
-安装器会自动准备 Xray 与 cloudflared；正式安装建议使用 GitHub Release 版本。
-
-### Argo 管理
-
-```bash
-f argo
-```
-
-支持：
-
-- VLESS-WS + Quick Tunnel
-- VMess-WS + Quick Tunnel
-- VLESS-WS + 固定 Tunnel
-- VMess-WS + 固定 Tunnel
-- 每条 Argo 绑定一个正在运行的 fanout VPN Gate 出口
-- cloudflared 异常退出自动重启
-- 节点写入 `/root/info.txt`
-
-### 固定 Tunnel
-
-固定 Tunnel 使用 Cloudflare Remote-managed Tunnel Token。创建 Tunnel 后，在 Cloudflare 的 Public Hostname 中把域名指向 fanout 创建的本机 WS 端口，例如：
-
-`argo.example.com → http://127.0.0.1:23456`
-
-然后在 `f argo` 中选择“固定 Tunnel”，填写域名、Tunnel Token 和 fanout 出口 HostName。
-
-### Quick Tunnel
-
-Quick Tunnel 不需要域名和 Token，cloudflared 会生成 `trycloudflare.com` 域名并自动写入节点。Quick Tunnel 适合测试，不建议作为长期生产节点。
+MIT。
